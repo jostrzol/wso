@@ -1,6 +1,5 @@
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
 
 from fastapi import FastAPI, WebSocket
 from pydantic import UUID4
@@ -21,7 +20,7 @@ async def print_status():
         table.add_column("Type")
         table.add_column("Name")
         table.add_column("Token")
-        table.add_column("Last beat before")
+        table.add_column("Last beat before", justify="right")
         for mgr in manager.other_managers():
             status = manager.connection_status(mgr.token)
             delta = format_last_beat(status)

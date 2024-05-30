@@ -53,7 +53,11 @@ class Manager:
             for vm in self.my_vms():
                 status = self.connection_status(vm.token)
                 if status.is_dead:
-                    logger.error(f"VM {vm.token} is dead")
+                    logger.error(f"VM #{vm.token} is dead")
+            for manager in self.other_managers():
+                status = self.connection_status(manager.token)
+                if status.is_dead:
+                    logger.error(f"Manager {manager.name} #{manager.token} is dead")
             await asyncio.sleep(1)
 
     async def watch_changes_forever(self):
@@ -70,6 +74,7 @@ class Manager:
             logger.info("config changed")
             self._config = config
             await self._replan()
+            self._update_last_hearbeats()
 
     async def _replan(self):
         new_plan = self._make_new_plan()
