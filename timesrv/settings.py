@@ -2,9 +2,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    manager_name: str
+    manager_address: str
+    token: str
 
-    model_config = SettingsConfigDict(env_prefix="WSOMGR_")
+    model_config = SettingsConfigDict(env_prefix="WSOTIMESRV_")
 
 
 settings = Settings(**{})

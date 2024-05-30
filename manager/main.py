@@ -39,7 +39,7 @@ manager = Manager(name=settings.manager_name, config=CONFIG)
 app = FastAPI()
 
 
-@app.websocket("/vms/{token}/heartbeat")
+@app.websocket("/heartbeats/{token}")
 async def websocket_endpoint(token: UUID4, websocket: WebSocket):
     await websocket.accept()
     while True:
