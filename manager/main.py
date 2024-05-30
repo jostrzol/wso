@@ -3,6 +3,7 @@ from pydantic import UUID4
 
 from .config import Config
 from .manager import Manager
+from .settings import settings
 
 
 CONFIG = Config.model_validate(
@@ -24,6 +25,7 @@ CONFIG = Config.model_validate(
         "vms": [
             {
                 "service": "timesrv",
+                "manager": "host1",
                 "address": "127.0.0.1",
                 "token": "f6f545eb-fa1b-489e-9c32-5b9260c59255",
             }
@@ -31,7 +33,7 @@ CONFIG = Config.model_validate(
     }
 )
 
-manager = Manager(config=CONFIG)
+manager = Manager(name=settings.manager_name, config=CONFIG)
 
 
 app = FastAPI()

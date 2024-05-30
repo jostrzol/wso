@@ -23,5 +23,6 @@ class ServiceConfig(BaseModel):
 
 class VMConfig(BaseModel):
     service: str
+    manager: str
     address: IPvAnyAddress
     token: UUID4
