@@ -41,11 +41,18 @@ class Manager:
 
     async def watch_changes_forever(self):
         asyncio.create_task(self._watch_plan_changes())
+        asyncio.create_task(self._watch_config_changes())
 
     async def _watch_plan_changes(self):
         async for plan in repository.watch_plan():
             logger.info(f"plan changed, current version: {plan.version}")
             self._execute_plan(plan)
+
+    async def _watch_config_changes(self):
+        async for config in repository.watch_config():
+            logger.info("config changed")
+            self._config = config
+            await self._replan()
 
     async def _replan(self):
         new_plan = self._make_new_plan()
@@ -75,7 +82,9 @@ class Manager:
                 to_remove = self._choose_vm_to_delete(vms)
                 vms.remove(to_remove)
             new_vms += vms
-        return Plan(version=self._plan.version, vms=new_vms) if changed else self._plan
+
+        new_version = self._plan.version + 1
+        return Plan(version=new_version, vms=new_vms) if changed else self._plan
 
     def _assign_host_for_new_vm(self) -> ManagerConfig:
         return random.choice(self._config.managers)

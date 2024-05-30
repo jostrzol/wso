@@ -59,7 +59,7 @@ class Repository:
 
     async def save_plan(self, plan: Plan) -> bool:
         result = await self._db.plans.replace_one(
-            {"_id": "global", "version": plan.version},
+            {"_id": "global", "version": plan.version - 1},
             plan.model_dump(mode="json"),
             upsert=True,
         )
@@ -74,6 +74,17 @@ class Repository:
                         yield Plan(**obj)
             except PyMongoError:
                 logger.exception("watching for plan changes")
+            await asyncio.sleep(WATCH_ERROR_RECOVERY_INTERVAL)
+
+    async def watch_config(self) -> AsyncIterator[Config]:
+        while True:
+            try:
+                async with self._db.configs.watch(full_document="required") as stream:
+                    async for change in stream:
+                        obj = change["fullDocument"]
+                        yield Config(**obj)
+            except PyMongoError:
+                logger.exception("watching for config changes")
             await asyncio.sleep(WATCH_ERROR_RECOVERY_INTERVAL)
 
 
