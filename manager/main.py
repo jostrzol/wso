@@ -62,11 +62,14 @@ async def websocket_endpoint(token: UUID4, websocket: WebSocket):
 async def create_vm(name: str):
     manager.create_new_vm(name, "timesrv")
 
+
 @app.get("/ip/{domain_name}")
 def get_ip(domain_name: str):
     return {"ip": manager.get_ip(domain_name)}
+
 
 @app.get("/delete/{name}")
 def delete_vm(name: str):
     manager.delete_vm(name)
     return {"status": "ok"}
+

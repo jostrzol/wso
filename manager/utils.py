@@ -1,5 +1,6 @@
 IMGS_PATH = "/home/kuba/Studia/mgr/wso/wso/imgs"
 
+
 def generate_timesrv_xml(name: str) -> str:
     return f"""
     <domain type='kvm'>
@@ -29,3 +30,4 @@ def generate_timesrv_xml(name: str) -> str:
       </devices>
     </domain>
     """
+

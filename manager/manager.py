@@ -4,21 +4,18 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 import logging
 import random
+import subprocess
 from typing import Any, Iterator, cast
 from uuid import uuid4
-from datetime import datetime
-from typing import Generator, NoReturn
-import subprocess
-import libvirt
 
-from pydantic import UUID4, IPvAnyAddress
+from pydantic import UUID4
+
+import libvirt
 
 from .config import Config, ManagerConfig
 from .plan import Plan, VMConfig
 from .repository import repository
-
-from .utils import generate_timesrv_xml, IMGS_PATH
-from .config import Config, ManagerConfig, VMConfig
+from .utils import IMGS_PATH, generate_timesrv_xml
 
 logger = logging.getLogger("uvicorn")
 
@@ -29,7 +26,7 @@ class Manager:
         self._config = config
         self._plan = plan
         self._update_last_hearbeats()
-        self._conn = libvirt.open('qemu:///system')
+        self._conn = libvirt.open("qemu:///system")
 
     @classmethod
     async def create(cls, name: str):
@@ -152,12 +149,17 @@ class Manager:
 
     def get_ip(self, domain_name: str):
         domain = self._conn.lookupByName(domain_name)
-        ifaces = domain.interfaceAddresses(libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_AGENT, 0)
+        ifaces = domain.interfaceAddresses(
+            libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_AGENT, 0
+        )
 
-        return ifaces['eth0']['addrs'][0]['addr']
+        return ifaces["eth0"]["addrs"][0]["addr"]
 
     def _create_timesrv_vm(self, name: str):
-        subprocess.run(["cp", f"{IMGS_PATH}/timesrv.qcow2" , f"{IMGS_PATH}/{name}.qcow2"], check=True)
+        subprocess.run(
+            ["cp", f"{IMGS_PATH}/timesrv.qcow2", f"{IMGS_PATH}/{name}.qcow2"],
+            check=True,
+        )
 
         try:
             self._conn.createXML(generate_timesrv_xml(name), 0)
