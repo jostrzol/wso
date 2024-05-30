@@ -5,10 +5,9 @@ from pydantic import UUID4, BaseModel, IPvAnyAddress
 
 
 class Config(BaseModel):
-    version: int
+    _id: str
     general: GeneralSettings
     managers: list[ManagerConfig]
-    vms: list[VMConfig]
     services: list[ServiceConfig]
 
 
@@ -26,10 +25,4 @@ class ServiceConfig(BaseModel):
     name: str
     image: str
     port: int
-
-
-class VMConfig(BaseModel):
-    service: str
-    manager: str
-    address: IPvAnyAddress
-    token: UUID4
+    replicas: int
