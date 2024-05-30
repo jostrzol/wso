@@ -1,18 +1,19 @@
 from __future__ import annotations
 from datetime import timedelta
 
-from pydantic import UUID4, BaseModel, Field, IPvAnyAddress
-
-
-class GeneralSettings(BaseModel):
-    max_inactive: timedelta = timedelta(seconds=10)
+from pydantic import UUID4, BaseModel, IPvAnyAddress
 
 
 class Config(BaseModel):
-    general: GeneralSettings = Field(default_factory=GeneralSettings)
+    version: int
+    general: GeneralSettings
     managers: list[ManagerConfig]
     vms: list[VMConfig]
     services: list[ServiceConfig]
+
+
+class GeneralSettings(BaseModel):
+    max_inactive: timedelta
 
 
 class ManagerConfig(BaseModel):

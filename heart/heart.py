@@ -14,7 +14,7 @@ class Heart:
         manager_address: str,
         token: str,
         beat_interval: float = 1.0,
-        reconnect_interval: float = 10.0,
+        reconnect_interval: float = 3.0,
     ):
         self._manager_address = manager_address
         self._token = token

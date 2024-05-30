@@ -15,6 +15,10 @@ from .settings import settings
 
 CONFIG = Config.model_validate(
     {
+        "version": 1,
+        "general": {
+            "max_inactive": 10,
+        },
         "managers": [
             {
                 "name": "host1",
@@ -40,31 +44,30 @@ CONFIG = Config.model_validate(
     }
 )
 
-FPS = 10
+FPS = 1
 
 manager = Manager(name=settings.manager_name, config=CONFIG)
 
 
 async def print_status():
     console = Console()
-    with Live(console=console, screen=False, auto_refresh=False) as live:
-        while True:
-            await asyncio.sleep(1 / FPS)
-            table = Table(show_footer=False)
-            table.add_column("Type")
-            table.add_column("Name")
-            table.add_column("Token")
-            table.add_column("Last beat before")
-            now = datetime.now()
-            for mgr in manager.other_managers():
-                last_heartbeat = manager.last_heartbeat(mgr.token)
-                delta = format_beat_delta(now - last_heartbeat)
-                table.add_row("Manager", mgr.name, str(mgr.token), delta)
-            for vm in manager.my_vms():
-                last_heartbeat = manager.last_heartbeat(vm.token)
-                delta = format_beat_delta(now - last_heartbeat)
-                table.add_row("VM", None, str(vm.token), delta)
-            live.update(table, refresh=True)
+    while True:
+        await asyncio.sleep(1 / FPS)
+        table = Table(show_footer=False)
+        table.add_column("Type")
+        table.add_column("Name")
+        table.add_column("Token")
+        table.add_column("Last beat before")
+        now = datetime.now()
+        for mgr in manager.other_managers():
+            last_heartbeat = manager.last_heartbeat(mgr.token)
+            delta = format_beat_delta(now - last_heartbeat)
+            table.add_row("Manager", mgr.name, str(mgr.token), delta)
+        for vm in manager.my_vms():
+            last_heartbeat = manager.last_heartbeat(vm.token)
+            delta = format_beat_delta(now - last_heartbeat)
+            table.add_row("VM", None, str(vm.token), delta)
+        console.print(table)
 
 
 def format_beat_delta(delta: timedelta) -> str:
@@ -77,7 +80,7 @@ def format_beat_delta(delta: timedelta) -> str:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_: FastAPI):
     asyncio.create_task(print_status())
     yield
 
