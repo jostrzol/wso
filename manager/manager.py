@@ -1,5 +1,7 @@
+from __future__ import annotations
 import asyncio
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 import logging
 import random
 from typing import Any, Iterator, cast
@@ -36,8 +38,23 @@ class Manager:
     def hearbeat(self, token: UUID4):
         self._last_hearbeats[token] = datetime.now()
 
-    def last_heartbeat(self, token: UUID4) -> datetime:
-        return self._last_hearbeats[token]
+    def connection_status(self, token: UUID4) -> ConnectionStatus:
+        last_beat = self._last_hearbeats[token]
+        last_beat_before = datetime.now() - last_beat
+        is_inactive = last_beat_before > self._config.general.max_inactive
+        return ConnectionStatus(
+            last_beat_at=last_beat,
+            last_beat_before=last_beat_before,
+            is_dead=is_inactive,
+        )
+
+    async def execute_plan_forever(self):
+        while True:
+            for vm in self.my_vms():
+                status = self.connection_status(vm.token)
+                if status.is_dead:
+                    logger.error(f"VM {vm.token} is dead")
+            await asyncio.sleep(1)
 
     async def watch_changes_forever(self):
         asyncio.create_task(self._watch_plan_changes())
@@ -46,7 +63,7 @@ class Manager:
     async def _watch_plan_changes(self):
         async for plan in repository.watch_plan():
             logger.info(f"plan changed, current version: {plan.version}")
-            self._execute_plan(plan)
+            self._assign_plan(plan)
 
     async def _watch_config_changes(self):
         async for config in repository.watch_config():
@@ -58,7 +75,7 @@ class Manager:
         new_plan = self._make_new_plan()
         if new_plan is not self._plan:
             await repository.save_plan(new_plan)
-            self._execute_plan(new_plan)
+            self._assign_plan(new_plan)
 
     def _make_new_plan(self) -> Plan:
         new_vms = []
@@ -92,7 +109,7 @@ class Manager:
     def _choose_vm_to_delete(self, vms: list[VMConfig]) -> VMConfig:
         return random.choice(vms)
 
-    def _execute_plan(self, plan: Plan):
+    def _assign_plan(self, plan: Plan):
         self._plan = plan
         self._update_last_hearbeats()
 
@@ -116,6 +133,13 @@ class Manager:
 
     def my_vms(self) -> Iterator[VMConfig]:
         yield from (vm for vm in self._plan.vms if vm.manager == self._name)
+
+
+@dataclass
+class ConnectionStatus:
+    last_beat_at: datetime
+    last_beat_before: timedelta
+    is_dead: bool
 
 
 manager: Manager = cast(Any, None)

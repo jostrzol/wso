@@ -7,7 +7,7 @@ from pydantic import UUID4
 from rich.console import Console
 from rich.table import Table
 
-from .manager import Manager, manager
+from .manager import ConnectionStatus, Manager, manager
 from .settings import settings
 
 FPS = 1
@@ -22,25 +22,20 @@ async def print_status():
         table.add_column("Name")
         table.add_column("Token")
         table.add_column("Last beat before")
-        now = datetime.now()
         for mgr in manager.other_managers():
-            last_heartbeat = manager.last_heartbeat(mgr.token)
-            delta = format_beat_delta(now - last_heartbeat)
+            status = manager.connection_status(mgr.token)
+            delta = format_last_beat(status)
             table.add_row("Manager", mgr.name, str(mgr.token), delta)
         for vm in manager.my_vms():
-            last_heartbeat = manager.last_heartbeat(vm.token)
-            delta = format_beat_delta(now - last_heartbeat)
+            status = manager.connection_status(vm.token)
+            delta = format_last_beat(status)
             table.add_row("VM", None, str(vm.token), delta)
         console.print(table)
 
 
-def format_beat_delta(delta: timedelta) -> str:
-    rounded = f"{delta.total_seconds() * 1000:.0f} ms"
-    return (
-        f"[red]{rounded}[/]"
-        if delta > manager.config.general.max_inactive
-        else f"[green]{rounded}[/]"
-    )
+def format_last_beat(status: ConnectionStatus) -> str:
+    rounded = f"{status.last_beat_before.total_seconds() * 1000:.0f} ms"
+    return f"[red]{rounded}[/]" if status.is_dead else f"[green]{rounded}[/]"
 
 
 @asynccontextmanager
@@ -49,6 +44,7 @@ async def lifespan(_: FastAPI):
     manager = await Manager.create(name=settings.manager_name)
     asyncio.create_task(print_status())
     asyncio.create_task(manager.watch_changes_forever())
+    asyncio.create_task(manager.execute_plan_forever())
     yield
 
 
