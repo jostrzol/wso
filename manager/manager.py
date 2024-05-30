@@ -6,12 +6,19 @@ import logging
 import random
 from typing import Any, Iterator, cast
 from uuid import uuid4
+from datetime import datetime
+from typing import Generator, NoReturn
+import subprocess
+import libvirt
 
-from pydantic import UUID4
+from pydantic import UUID4, IPvAnyAddress
 
 from .config import Config, ManagerConfig
 from .plan import Plan, VMConfig
 from .repository import repository
+
+from .utils import generate_timesrv_xml, IMGS_PATH
+from .config import Config, ManagerConfig, VMConfig
 
 logger = logging.getLogger("uvicorn")
 
@@ -22,6 +29,7 @@ class Manager:
         self._config = config
         self._plan = plan
         self._update_last_hearbeats()
+        self._conn = libvirt.open('qemu:///system')
 
     @classmethod
     async def create(cls, name: str):
@@ -138,6 +146,38 @@ class Manager:
 
     def my_vms(self) -> Iterator[VMConfig]:
         yield from (vm for vm in self._plan.vms if vm.manager == self._name)
+
+    def last_heartbeat(self, token: UUID4) -> datetime:
+        return self._last_hearbeats[token]
+
+    def get_ip(self, domain_name: str):
+        domain = self._conn.lookupByName(domain_name)
+        ifaces = domain.interfaceAddresses(libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_AGENT, 0)
+
+        return ifaces['eth0']['addrs'][0]['addr']
+
+    def _create_timesrv_vm(self, name: str):
+        subprocess.run(["cp", f"{IMGS_PATH}/timesrv.qcow2" , f"{IMGS_PATH}/{name}.qcow2"], check=True)
+
+        try:
+            self._conn.createXML(generate_timesrv_xml(name), 0)
+        except libvirt.libvirtError as e:
+            raise Exception(f"Failed to create VM: {e}")
+
+    def delete_vm(self, name: str):
+        try:
+            dom = self._conn.lookupByName(name)
+
+            if dom.isActive():
+                dom.destroy()
+
+            subprocess.run(["rm", f"{IMGS_PATH}/{name}.qcow2"], check=True)
+        except libvirt.libvirtError as e:
+            raise Exception(f"Failed to delete VM: {e}")
+
+    def create_new_vm(self, name: str, service: str):
+        if service == "timesrv":
+            self._create_timesrv_vm(name)
 
 
 @dataclass
