@@ -5,7 +5,6 @@ from pydantic import UUID4, BaseModel, IPvAnyAddress
 
 
 class Config(BaseModel):
-    _id: str
     general: GeneralSettings
     managers: list[ManagerConfig]
     services: list[ServiceConfig]

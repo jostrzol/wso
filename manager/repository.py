@@ -40,18 +40,18 @@ class Repository:
         return (b.read(), host["port"])
 
     async def get_config(self) -> Config:
-        obj = await self._db.configs.find_one({"_id": "config"})
+        obj = await self._db.configs.find_one({"_id": "global"})
         if obj is None:
             raise Exception("configuration not found; configure first with 'ctl'")
         return Config(**obj)
 
     async def get_plan(self) -> Plan:
-        obj = await self._db.vms.find_one({"_id": "config"})
+        obj = await self._db.vms.find_one({"_id": "global"})
         return Plan(**obj) if obj is not None else Plan()
 
-    async def save_vms_config(self, vms: Plan) -> bool:
+    async def save_plan(self, vms: Plan) -> bool:
         result = await self._db.vms.replace_one(
-            {"_id": "config", "version": vms.version},
+            {"_id": "global", "version": vms.version},
             vms.model_dump(mode="json"),
             upsert=True,
         )

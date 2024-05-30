@@ -30,7 +30,7 @@ def main():
     mongo = MongoClient(args.db)
     db = mongo.get_default_database()
     db.configs.replace_one(
-        {"_id": "config"}, new_config.model_dump(mode="json"), upsert=True
+        {"_id": "global"}, new_config.model_dump(mode="json"), upsert=True
     )
 
 
