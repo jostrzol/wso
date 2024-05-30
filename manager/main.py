@@ -1,6 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI, WebSocket
 from pydantic import UUID4
@@ -58,13 +58,22 @@ async def print_status():
             now = datetime.now()
             for mgr in manager.other_managers():
                 last_heartbeat = manager.last_heartbeat(mgr.token)
-                delta = now - last_heartbeat
-                table.add_row("Manager", mgr.name, str(mgr.token), str(delta))
+                delta = format_beat_delta(now - last_heartbeat)
+                table.add_row("Manager", mgr.name, str(mgr.token), delta)
             for vm in manager.my_vms():
                 last_heartbeat = manager.last_heartbeat(vm.token)
-                delta = int((now - last_heartbeat).total_seconds() * 1000)
-                table.add_row("VM", None, str(vm.token), f"{delta} ms")
+                delta = format_beat_delta(now - last_heartbeat)
+                table.add_row("VM", None, str(vm.token), delta)
             live.update(table, refresh=True)
+
+
+def format_beat_delta(delta: timedelta) -> str:
+    rounded = f"{delta.total_seconds() * 1000:.0f} ms"
+    return (
+        f"[red]{rounded}[/]"
+        if delta > manager.config.general.max_inactive
+        else f"[green]{rounded}[/]"
+    )
 
 
 @asynccontextmanager

@@ -49,4 +49,5 @@ class Heart:
     @asynccontextmanager
     async def _connect(self) -> AsyncIterator[WebSocketClientProtocol]:
         async with client.connect(self._ws_url) as websocket:
+            logger.info("heartbeat connection established")
             yield websocket
