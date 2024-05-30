@@ -1,4 +1,6 @@
+import asyncio
 from datetime import datetime
+import logging
 import random
 from typing import Any, Iterator, cast
 from uuid import uuid4
@@ -9,40 +11,27 @@ from .config import Config, ManagerConfig
 from .plan import Plan, VMConfig
 from .repository import repository
 
+logger = logging.getLogger("uvicorn")
+
 
 class Manager:
     def __init__(self, name: str, config: Config, plan: Plan):
         self._name = name
         self._config = config
         self._plan = plan
-
-        tokens = self._relevant_tokens()
-        now = datetime.now()
-        self._last_hearbeats = {token: now for token in tokens}
+        self._update_last_hearbeats()
 
     @classmethod
     async def create(cls, name: str):
         config = await repository.get_config()
         plan = await repository.get_plan()
-        return cls(name=name, config=config, plan=plan)
+        manager = cls(name=name, config=config, plan=plan)
+        await manager._replan()
+        return manager
 
     @property
     def config(self):
         return self._config
-
-    def _relevant_tokens(self) -> Iterator[UUID4]:
-        yield from (
-            *(manager.token for manager in self.other_managers()),
-            *(vm.token for vm in self.my_vms()),
-        )
-
-    def other_managers(self) -> Iterator[ManagerConfig]:
-        yield from (
-            manager for manager in self._config.managers if manager.name != self._name
-        )
-
-    def my_vms(self) -> Iterator[VMConfig]:
-        yield from (vm for vm in self._plan.vms if vm.manager == self._name)
 
     def hearbeat(self, token: UUID4):
         self._last_hearbeats[token] = datetime.now()
@@ -51,12 +40,18 @@ class Manager:
         return self._last_hearbeats[token]
 
     async def watch_changes_forever(self):
-        await self._replan()
+        asyncio.create_task(self._watch_plan_changes())
+
+    async def _watch_plan_changes(self):
+        async for plan in repository.watch_plan():
+            logger.info(f"plan changed, current version: {plan.version}")
+            self._execute_plan(plan)
 
     async def _replan(self):
         new_plan = self._make_new_plan()
         if new_plan is not self._plan:
             await repository.save_plan(new_plan)
+            self._execute_plan(new_plan)
 
     def _make_new_plan(self) -> Plan:
         new_vms = []
@@ -87,6 +82,31 @@ class Manager:
 
     def _choose_vm_to_delete(self, vms: list[VMConfig]) -> VMConfig:
         return random.choice(vms)
+
+    def _execute_plan(self, plan: Plan):
+        self._plan = plan
+        self._update_last_hearbeats()
+
+    def _update_last_hearbeats(self):
+        tokens = self._relevant_tokens()
+        now = datetime.now()
+        if not hasattr(self, "_last_hearbeats"):
+            self._last_hearbeats = {}
+        self._last_hearbeats = {token: now for token in tokens} | self._last_hearbeats
+
+    def _relevant_tokens(self) -> Iterator[UUID4]:
+        yield from (
+            *(manager.token for manager in self.other_managers()),
+            *(vm.token for vm in self.my_vms()),
+        )
+
+    def other_managers(self) -> Iterator[ManagerConfig]:
+        yield from (
+            manager for manager in self._config.managers if manager.name != self._name
+        )
+
+    def my_vms(self) -> Iterator[VMConfig]:
+        yield from (vm for vm in self._plan.vms if vm.manager == self._name)
 
 
 manager: Manager = cast(Any, None)

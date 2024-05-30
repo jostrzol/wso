@@ -1,11 +1,19 @@
+import asyncio
 from io import StringIO
+import logging
+from typing import AsyncIterator
 
-from motor.motor_asyncio import AsyncIOMotorClient
+from motor.motor_asyncio import AsyncIOMotorChangeStream, AsyncIOMotorClient
 from pydantic import MongoDsn
+from pymongo.errors import PyMongoError
 
 from .config import Config
-from .settings import settings
 from .plan import Plan
+from .settings import settings
+
+WATCH_ERROR_RECOVERY_INTERVAL = 10.0
+
+logger = logging.getLogger("uvicorn")
 
 
 class Repository:
@@ -46,16 +54,27 @@ class Repository:
         return Config(**obj)
 
     async def get_plan(self) -> Plan:
-        obj = await self._db.vms.find_one({"_id": "global"})
+        obj = await self._db.plans.find_one({"_id": "global"})
         return Plan(**obj) if obj is not None else Plan()
 
-    async def save_plan(self, vms: Plan) -> bool:
-        result = await self._db.vms.replace_one(
-            {"_id": "global", "version": vms.version},
-            vms.model_dump(mode="json"),
+    async def save_plan(self, plan: Plan) -> bool:
+        result = await self._db.plans.replace_one(
+            {"_id": "global", "version": plan.version},
+            plan.model_dump(mode="json"),
             upsert=True,
         )
         return result.modified_count > 0
+
+    async def watch_plan(self) -> AsyncIterator[Plan]:
+        while True:
+            try:
+                async with self._db.plans.watch(full_document="required") as stream:
+                    async for change in stream:
+                        obj = change["fullDocument"]
+                        yield Plan(**obj)
+            except PyMongoError:
+                logger.exception("watching for plan changes")
+            await asyncio.sleep(WATCH_ERROR_RECOVERY_INTERVAL)
 
 
 repository = Repository(settings.connection_string)
