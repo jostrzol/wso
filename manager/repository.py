@@ -5,7 +5,7 @@ from pydantic import MongoDsn
 
 from .config import Config
 from .settings import settings
-from .vms import VMsConfig
+from .plan import Plan
 
 
 class Repository:
@@ -45,11 +45,17 @@ class Repository:
             raise Exception("configuration not found; configure first with 'ctl'")
         return Config(**obj)
 
-    async def get_vms_config(self) -> VMsConfig:
+    async def get_plan(self) -> Plan:
         obj = await self._db.vms.find_one({"_id": "config"})
-        if obj is None:
-            raise Exception("vms configuration not found; configure first with 'ctl'")
-        return VMsConfig(**obj)
+        return Plan(**obj) if obj is not None else Plan()
+
+    async def save_vms_config(self, vms: Plan) -> bool:
+        result = await self._db.vms.replace_one(
+            {"_id": "config", "version": vms.version},
+            vms.model_dump(mode="json"),
+            upsert=True,
+        )
+        return result.modified_count > 0
 
 
 repository = Repository(settings.connection_string)

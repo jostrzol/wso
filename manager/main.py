@@ -48,6 +48,7 @@ async def lifespan(_: FastAPI):
     global manager
     manager = await Manager.create(name=settings.manager_name)
     asyncio.create_task(print_status())
+    asyncio.create_task(manager.watch_changes_forever())
     yield
 
 
