@@ -23,4 +23,4 @@ class VMConfig(BaseModel):
 
     @property
     def name(self):
-        return f"wso-{self.service}-{self.token}"
+        return f"wso-{self.service}-{self.manager}-{self.token}"

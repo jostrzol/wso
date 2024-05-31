@@ -1,7 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 import logging
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 from websockets import ConnectionClosedError, WebSocketClientProtocol, client
 
@@ -21,13 +21,22 @@ class Heart:
         self._beat_interval = beat_interval
         self._reconnect_interval = reconnect_interval
 
+    async def beat_until(self, predicate: Callable[[], bool]):
+        async for websocket in self._reconnect_forever():
+            try:
+                while predicate():
+                    await self._beat(websocket)
+                break
+            except ConnectionClosedError:
+                logger.exception(f"{self.name} connection closed")
+
     async def beat_forever(self):
         async for websocket in self._reconnect_forever():
             try:
                 while True:
                     await self._beat(websocket)
             except ConnectionClosedError:
-                logger.exception("heartbeat connection closed")
+                logger.exception(f"{self.name} connection closed")
 
     async def _beat(self, websocket: WebSocketClientProtocol):
         await asyncio.sleep(self._beat_interval)
@@ -43,11 +52,15 @@ class Heart:
                 async with self._connect() as websocket:
                     yield websocket
             except Exception:
-                logger.exception("could not connect heartbeat")
+                logger.error(f"{self.name} connection refused")
             await asyncio.sleep(self._reconnect_interval)
 
     @asynccontextmanager
     async def _connect(self) -> AsyncIterator[WebSocketClientProtocol]:
         async with client.connect(self._ws_url) as websocket:
-            logger.info("heartbeat connection established")
+            logger.info(f"{self.name} connection established")
             yield websocket
+
+    @property
+    def name(self):
+        return f"heart#{self._token}"

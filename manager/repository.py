@@ -5,7 +5,7 @@ from typing import AsyncIterator
 
 from motor.motor_asyncio import AsyncIOMotorChangeStream, AsyncIOMotorClient
 from pydantic import MongoDsn
-from pymongo.errors import PyMongoError
+from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from .config import Config
 from .plan import Plan
@@ -58,12 +58,15 @@ class Repository:
         return Plan(**obj) if obj is not None else Plan()
 
     async def save_plan(self, plan: Plan) -> bool:
-        result = await self._db.plans.replace_one(
-            {"_id": "global", "version": plan.version - 1},
-            plan.model_dump(mode="json"),
-            upsert=True,
-        )
-        return result.modified_count > 0
+        try:
+            result = await self._db.plans.replace_one(
+                {"_id": "global", "version": plan.version - 1},
+                plan.model_dump(mode="json"),
+                upsert=True,
+            )
+            return result.modified_count > 0
+        except DuplicateKeyError:
+            return False
 
     async def watch_plan(self) -> AsyncIterator[Plan]:
         while True:

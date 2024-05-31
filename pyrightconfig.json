@@ -1,9 +1,5 @@
 {
   "pythonVersion": "3.12",
   "pythonPlatform": "Linux",
-  "executionEnvironments": [
-    {
-      "root": "manager"
-    }
-  ]
+  "executionEnvironments": []
 }

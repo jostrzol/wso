@@ -14,6 +14,8 @@ import os
 
 from time import time
 
+from heart.heart import Heart
+
 from .config import Config, ManagerConfig
 from .plan import Plan, VMConfig
 from .repository import repository
@@ -31,6 +33,7 @@ class Manager:
         self._plan = plan
         self._statuses: dict[UUID4, ConnectionStatus] = {}
         self._conn = libvirt.open("qemu:///system")
+        self._hearts: dict[UUID4, Heart] = {}
 
     @classmethod
     async def create(cls, name: str):
@@ -106,14 +109,14 @@ class Manager:
     async def _watch_config_changes(self):
         async for config in repository.watch_config():
             logger.info("config changed")
-            await self._on_config_changed(config)
+            await self._on_config_changed(config, self._config)
 
     async def _on_config_changed(
         self, config: Config, old_config: Config | None = None
     ) -> Plan:
         self._config = config
         old_managers = old_config.managers if old_config else None
-        self._update_manager_statuses(config.managers, old_managers)
+        self._on_managers_changed(config.managers, old_managers)
 
         new_plan = self._remake_plan(self._plan)
         if new_plan is not self._plan:
@@ -122,26 +125,32 @@ class Manager:
                 return new_plan
         return self._plan
 
-    def _update_manager_statuses(
+    def _on_managers_changed(
         self,
         new_managers: list[ManagerConfig],
         old_managers: list[ManagerConfig] | None = None,
     ):
         if old_managers is None:
             old_managers = []
+        new_managers = list(self.other_managers(new_managers))
+        old_managers = list(self.other_managers(old_managers))
         old_mgr_tokens = {mgr.token for mgr in old_managers}
         new_mgr_tokens = {mgr.token for mgr in new_managers}
         to_create = [mgr for mgr in new_managers if mgr.token not in old_mgr_tokens]
         to_delete = [mgr for mgr in old_managers if mgr.token not in new_mgr_tokens]
         for mgr in to_create:
             self._statuses[mgr.token] = ConnectionStatus()
+            logger.warn(f"making heart {mgr.token}")
+            heart = Heart(mgr.host, str(self.token))
+            asyncio.create_task(heart.beat_until(lambda: mgr.token in self._hearts))
+            self._hearts[mgr.token] = heart
         for mgr in to_delete:
             self._statuses.pop(mgr.token, None)
+            self._hearts.pop(mgr.token, None)
 
     def _remake_plan(self, current_plan: Plan) -> Plan:
         new_vms = []
         changed = False
-        print(self._config.services)
         for service in self._config.services:
             vms = current_plan.for_service(service.name)
             delta = service.replicas - len(vms)
@@ -175,8 +184,6 @@ class Manager:
         self._plan = plan
         new_vms = list(self.my_vms(plan.vms))
         old_vms = list(self.list_current_vms())
-        print(old_vms)
-        print(new_vms)
         new_vm_names = {vm.name for vm in new_vms}
         old_vm_names = {vm.name for vm in old_vms}
         to_create = [vm for vm in new_vms if vm.name not in old_vm_names]
@@ -207,10 +214,13 @@ class Manager:
         await asyncio.to_thread(impl)
         self._statuses.pop(vm.token, None)
 
-    def other_managers(self) -> Iterable[ManagerConfig]:
-        yield from (
-            manager for manager in self._config.managers if manager.name != self._name
-        )
+    @property
+    def imgs_path(self) -> str:
+        return str(self.my_config.imgs_path)
+
+    @property
+    def token(self) -> UUID4:
+        return self.my_config.token
 
     @property
     def my_config(self) -> ManagerConfig:
@@ -219,9 +229,12 @@ class Manager:
                 return manager
         raise Exception(f"manager '{settings.manager_name}' not in config")
 
-    @property
-    def imgs_path(self) -> str:
-        return str(self.my_config.imgs_path)
+    def other_managers(
+        self, mgrs: Iterable[ManagerConfig] | None = None
+    ) -> Iterable[ManagerConfig]:
+        if mgrs is None:
+            mgrs = self.config.managers
+        yield from (mgr for mgr in mgrs if mgr.name != self._name)
 
     def my_vms(self, vms: Iterable[VMConfig] | None = None) -> Iterable[VMConfig]:
         if vms is None:
@@ -229,20 +242,24 @@ class Manager:
         yield from (vm for vm in vms if vm.manager == self._name)
 
     VM_NAME_REGEX = re.compile(
-        r"^wso-(.*)-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
+        r"^wso-(.*)-(.*)-"
+        r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
     )
 
     def list_current_vms(self) -> Iterable[VMConfig]:
         for domain in self._conn.listAllDomains():
             match = re.match(self.VM_NAME_REGEX, domain.name())
-            if match is not None:
-                service, token = match.groups()
-                yield VMConfig(
-                    service=service,
-                    manager=self.my_config.name,
-                    address=cast(Any, "127.0.0.1"),
-                    token=UUID4(token),
-                )
+            if match is None:
+                continue
+            service, manager, token = match.groups()
+            if manager != self._name:
+                continue
+            yield VMConfig(
+                service=service,
+                manager=manager,
+                address=cast(Any, "127.0.0.1"),
+                token=UUID4(token),
+            )
 
     def get_ip(self, domain_name: str):
         domain = self._conn.lookupByName(domain_name)
