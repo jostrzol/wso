@@ -72,4 +72,3 @@ def get_ip(domain_name: str):
 def delete_vm(name: str):
     manager.delete_vm(name)
     return {"status": "ok"}
-
