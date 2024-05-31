@@ -1,15 +1,15 @@
 from __future__ import annotations
 import asyncio
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
 import random
+import re
 import subprocess
-from typing import Any, Iterator, cast
+from typing import Any, Iterable, cast
 from uuid import uuid4
 
 import libvirt
-from pydantic import UUID4
+from pydantic import BaseModel, Field, UUID4
 
 from .config import Config, ManagerConfig
 from .plan import Plan, VMConfig
@@ -25,7 +25,7 @@ class Manager:
         self._name = name
         self._config = config
         self._plan = plan
-        self._update_last_hearbeats()
+        self._statuses: dict[UUID4, ConnectionStatus] = {}
         self._conn = libvirt.open("qemu:///system")
 
     @classmethod
@@ -33,65 +33,109 @@ class Manager:
         config = await repository.get_config()
         plan = await repository.get_plan()
         manager = cls(name=name, config=config, plan=plan)
-        await manager._replan()
+        await manager._on_config_changed(config)
+        await manager._on_plan_changed(plan)
         return manager
 
     @property
     def config(self):
         return self._config
 
-    def hearbeat(self, token: UUID4):
-        self._last_hearbeats[token] = datetime.now()
+    def hearbeat(self, token: UUID4) -> bool:
+        status = self._statuses.get(token)
+        if status is None:
+            return False
+        status.last_beat_at = datetime.now()
+        return True
 
-    def connection_status(self, token: UUID4) -> ConnectionStatus:
-        last_beat = self._last_hearbeats[token]
-        last_beat_before = datetime.now() - last_beat
-        is_inactive = last_beat_before > self._config.general.max_inactive
-        return ConnectionStatus(
-            last_beat_at=last_beat,
-            last_beat_before=last_beat_before,
-            is_dead=is_inactive,
-        )
+    def manager_statuses(self) -> Iterable[tuple[ManagerConfig, ConnectionStatus]]:
+        for manager in self.other_managers():
+            status = self.status(manager.token)
+            if status is None:
+                continue
+            yield (manager, status)
+
+    def vm_statuses(self) -> Iterable[tuple[VMConfig, ConnectionStatus]]:
+        for vm in self.my_vms():
+            status = self.status(vm.token)
+            if status is None:
+                continue
+            yield (vm, status)
+
+    def status(self, token: UUID4) -> ConnectionStatus | None:
+        status = self._statuses.get(token)
+        if status is None:
+            return None
+        if not status.is_dead and status.last_beat_at:
+            dead_since = status.last_beat_at + self._config.general.max_inactive
+            if dead_since < datetime.now():
+                status = status.model_copy(update={"dead_since": dead_since})
+                self._statuses[token] = status
+        return status
 
     async def execute_plan_forever(self):
         while True:
             for vm in self.my_vms():
-                status = self.connection_status(vm.token)
+                status = self.status(vm.token)
+                if status is None:
+                    continue
                 if status.is_dead:
-                    logger.error(f"VM #{vm.token} is dead")
+                    logger.error(f"VM {vm.name} is dead")
+                    new_plan = self._remake_plan(self._plan.with_vm_removed(vm.name))
+                    await repository.save_plan(new_plan)
             for manager in self.other_managers():
-                status = self.connection_status(manager.token)
+                status = self.status(manager.token)
+                if status is None:
+                    continue
                 if status.is_dead:
                     logger.error(f"Manager {manager.name} #{manager.token} is dead")
             await asyncio.sleep(1)
 
     async def watch_changes_forever(self):
-        asyncio.create_task(self._watch_plan_changes())
-        asyncio.create_task(self._watch_config_changes())
+        await asyncio.gather(self._watch_plan_changes(), self._watch_config_changes())
 
     async def _watch_plan_changes(self):
         async for plan in repository.watch_plan():
             logger.info(f"plan changed, current version: {plan.version}")
-            self._assign_plan(plan)
+            await self._on_plan_changed(plan)
 
     async def _watch_config_changes(self):
         async for config in repository.watch_config():
             logger.info("config changed")
-            self._config = config
-            await self._replan()
-            self._update_last_hearbeats()
+            await self._on_config_changed(config)
 
-    async def _replan(self):
-        new_plan = self._make_new_plan()
+    async def _on_config_changed(
+        self, config: Config, old_config: Config | None = None
+    ):
+        self._config = config
+        old_managers = old_config.managers if old_config else None
+        self._update_manager_statuses(config.managers, old_managers)
+
+        new_plan = self._remake_plan(self._plan)
         if new_plan is not self._plan:
             await repository.save_plan(new_plan)
-            self._assign_plan(new_plan)
 
-    def _make_new_plan(self) -> Plan:
+    def _update_manager_statuses(
+        self,
+        new_managers: list[ManagerConfig],
+        old_managers: list[ManagerConfig] | None = None,
+    ):
+        if old_managers is None:
+            old_managers = []
+        old_mgr_tokens = {mgr.token for mgr in old_managers}
+        new_mgr_tokens = {mgr.token for mgr in new_managers}
+        to_create = [mgr for mgr in new_managers if mgr.token not in old_mgr_tokens]
+        to_delete = [mgr for mgr in old_managers if mgr.token not in new_mgr_tokens]
+        for mgr in to_create:
+            self._statuses[mgr.token] = ConnectionStatus()
+        for mgr in to_delete:
+            self._statuses.pop(mgr.token)
+
+    def _remake_plan(self, current_plan: Plan) -> Plan:
         new_vms = []
         changed = False
         for service in self._config.services:
-            vms = self._plan.for_service(service.name)
+            vms = current_plan.for_service(service.name)
             delta = service.replicas - len(vms)
             if delta != 0:
                 changed = True
@@ -110,7 +154,7 @@ class Manager:
                 vms.remove(to_remove)
             new_vms += vms
 
-        new_version = self._plan.version + 1
+        new_version = current_plan.version + 1
         return Plan(version=new_version, vms=new_vms) if changed else self._plan
 
     def _assign_host_for_new_vm(self) -> ManagerConfig:
@@ -119,24 +163,41 @@ class Manager:
     def _choose_vm_to_delete(self, vms: list[VMConfig]) -> VMConfig:
         return random.choice(vms)
 
-    def _assign_plan(self, plan: Plan):
+    async def _on_plan_changed(self, plan: Plan):
         self._plan = plan
-        self._update_last_hearbeats()
-
-    def _update_last_hearbeats(self):
-        tokens = self._relevant_tokens()
-        now = datetime.now()
-        if not hasattr(self, "_last_hearbeats"):
-            self._last_hearbeats = {}
-        self._last_hearbeats = {token: now for token in tokens} | self._last_hearbeats
-
-    def _relevant_tokens(self) -> Iterator[UUID4]:
-        yield from (
-            *(manager.token for manager in self.other_managers()),
-            *(vm.token for vm in self.my_vms()),
+        new_vms = list(self.my_vms(plan.vms))
+        old_vms = list(self.list_current_vms())
+        new_vm_names = {vm.name for vm in new_vms}
+        old_vm_names = {vm.name for vm in old_vms}
+        to_create = [vm for vm in new_vms if vm.name not in old_vm_names]
+        to_delete = [vm for vm in old_vms if vm.name not in new_vm_names]
+        await asyncio.gather(
+            *(self._create_vm(vm) for vm in to_create),
+            *(self._delete_vm(vm) for vm in to_delete),
         )
+        self._statuses = {
+            vm.token: ConnectionStatus() for vm in new_vms
+        } | self._statuses
 
-    def other_managers(self) -> Iterator[ManagerConfig]:
+    async def _create_vm(self, vm: VMConfig):
+        def impl():
+            logger.info(f"starting VM {vm.name}")
+            self.create_new_vm(vm.name, vm.service)
+            logger.info(f"VM {vm.name} active")
+
+        await asyncio.to_thread(impl)
+        status = ConnectionStatus()
+        self._statuses[vm.token] = status
+
+    async def _delete_vm(self, vm: VMConfig):
+        def impl():
+            logger.info(f"deleting VM {vm.name}")
+            self.delete_vm(vm.name)
+
+        await asyncio.to_thread(impl)
+        self._statuses.pop(vm.token)
+
+    def other_managers(self) -> Iterable[ManagerConfig]:
         yield from (
             manager for manager in self._config.managers if manager.name != self._name
         )
@@ -152,11 +213,26 @@ class Manager:
     def imgs_path(self) -> str:
         return str(self.my_config.imgs_path)
 
-    def my_vms(self) -> Iterator[VMConfig]:
-        yield from (vm for vm in self._plan.vms if vm.manager == self._name)
+    def my_vms(self, vms: Iterable[VMConfig] | None = None) -> Iterable[VMConfig]:
+        if vms is None:
+            vms = self._plan.vms
+        yield from (vm for vm in vms if vm.manager == self._name)
 
-    def last_heartbeat(self, token: UUID4) -> datetime:
-        return self._last_hearbeats[token]
+    VM_NAME_REGEX = re.compile(
+        r"^wso-(.*)-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
+    )
+
+    def list_current_vms(self) -> Iterable[VMConfig]:
+        for domain in self._conn.listAllDomains():
+            match = re.match(self.VM_NAME_REGEX, domain.name())
+            if match is not None:
+                service, token = match.groups()
+                yield VMConfig(
+                    service=service,
+                    manager=self.my_config.name,
+                    address=cast(Any, "127.0.0.1"),
+                    token=UUID4(token),
+                )
 
     def get_ip(self, domain_name: str):
         domain = self._conn.lookupByName(domain_name)
@@ -165,6 +241,10 @@ class Manager:
         )
 
         return ifaces["eth0"]["addrs"][0]["addr"]
+
+    def create_new_vm(self, name: str, service: str):
+        if service == "timesrv":
+            self._create_timesrv_vm(name)
 
     def _create_timesrv_vm(self, name: str):
         subprocess.run(
@@ -188,16 +268,20 @@ class Manager:
         except libvirt.libvirtError as e:
             raise Exception(f"Failed to delete VM: {e}")
 
-    def create_new_vm(self, name: str, service: str):
-        if service == "timesrv":
-            self._create_timesrv_vm(name)
 
+class ConnectionStatus(BaseModel):
+    planned_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime | None = None
+    last_beat_at: datetime | None = None
+    dead_since: datetime | None = None
 
-@dataclass
-class ConnectionStatus:
-    last_beat_at: datetime
-    last_beat_before: timedelta
-    is_dead: bool
+    @property
+    def last_beat_before(self):
+        return datetime.now() - self.last_beat_at if self.last_beat_at else None
+
+    @property
+    def is_dead(self):
+        return self.dead_since is not None
 
 
 manager: Manager = cast(Any, None)

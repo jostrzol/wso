@@ -19,20 +19,19 @@ async def print_status():
         table = Table(show_footer=False)
         table.add_column("Type")
         table.add_column("Name")
-        table.add_column("Token")
         table.add_column("Last beat before", justify="right")
-        for mgr in manager.other_managers():
-            status = manager.connection_status(mgr.token)
+        for mgr, status in manager.manager_statuses():
             delta = format_last_beat(status)
-            table.add_row("Manager", mgr.name, str(mgr.token), delta)
-        for vm in manager.my_vms():
-            status = manager.connection_status(vm.token)
+            table.add_row("Manager", mgr.name, delta)
+        for vm, status in manager.vm_statuses():
             delta = format_last_beat(status)
-            table.add_row("VM", None, str(vm.token), delta)
+            table.add_row("VM", vm.name, delta)
         console.print(table)
 
 
 def format_last_beat(status: ConnectionStatus) -> str:
+    if status.last_beat_before is None:
+        return "-"
     rounded = f"{status.last_beat_before.total_seconds() * 1000:.0f} ms"
     return f"[red]{rounded}[/]" if status.is_dead else f"[green]{rounded}[/]"
 
@@ -55,7 +54,9 @@ async def websocket_endpoint(token: UUID4, websocket: WebSocket):
     await websocket.accept()
     while True:
         _ = await websocket.receive_text()
-        manager.hearbeat(token)
+        if not manager.hearbeat(token):
+            await websocket.close(code=1008, reason=f"Did not expect token '{token}'")
+            break
 
 
 @app.get("/create_time/{name}")
