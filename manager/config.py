@@ -18,6 +18,7 @@ class ManagerConfig(BaseModel):
     name: str
     address: IPvAnyAddress
     token: UUID4
+    imgs_path: str
 
 
 class ServiceConfig(BaseModel):

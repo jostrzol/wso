@@ -8,14 +8,14 @@ import subprocess
 from typing import Any, Iterator, cast
 from uuid import uuid4
 
-from pydantic import UUID4
-
 import libvirt
+from pydantic import UUID4
 
 from .config import Config, ManagerConfig
 from .plan import Plan, VMConfig
 from .repository import repository
-from .utils import IMGS_PATH, generate_timesrv_xml
+from .settings import settings
+from .utils import generate_timesrv_xml
 
 logger = logging.getLogger("uvicorn")
 
@@ -141,6 +141,17 @@ class Manager:
             manager for manager in self._config.managers if manager.name != self._name
         )
 
+    @property
+    def my_config(self) -> ManagerConfig:
+        for manager in self._config.managers:
+            if manager.name == settings.manager_name:
+                return manager
+        raise Exception(f"manager '{settings.manager_name}' not in config")
+
+    @property
+    def imgs_path(self) -> str:
+        return str(self.my_config.imgs_path)
+
     def my_vms(self) -> Iterator[VMConfig]:
         yield from (vm for vm in self._plan.vms if vm.manager == self._name)
 
@@ -157,12 +168,12 @@ class Manager:
 
     def _create_timesrv_vm(self, name: str):
         subprocess.run(
-            ["cp", f"{IMGS_PATH}/timesrv.qcow2", f"{IMGS_PATH}/{name}.qcow2"],
+            ["cp", f"{self.imgs_path}/timesrv.qcow2", f"{self.imgs_path}/{name}.qcow2"],
             check=True,
         )
 
         try:
-            self._conn.createXML(generate_timesrv_xml(name), 0)
+            self._conn.createXML(generate_timesrv_xml(self.imgs_path, name), 0)
         except libvirt.libvirtError as e:
             raise Exception(f"Failed to create VM: {e}")
 
@@ -173,7 +184,7 @@ class Manager:
             if dom.isActive():
                 dom.destroy()
 
-            subprocess.run(["rm", f"{IMGS_PATH}/{name}.qcow2"], check=True)
+            subprocess.run(["rm", f"{self.imgs_path}/{name}.qcow2"], check=True)
         except libvirt.libvirtError as e:
             raise Exception(f"Failed to delete VM: {e}")
 

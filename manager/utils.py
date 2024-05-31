@@ -1,7 +1,4 @@
-IMGS_PATH = "/home/kuba/Studia/mgr/wso/wso/imgs"
-
-
-def generate_timesrv_xml(name: str) -> str:
+def generate_timesrv_xml(imgs_path: str, name: str) -> str:
     return f"""
     <domain type='kvm'>
       <name>{name}</name>
@@ -14,7 +11,7 @@ def generate_timesrv_xml(name: str) -> str:
       <devices>
         <disk type='file' device='disk'>
           <driver name='qemu' type='qcow2'/>
-          <source file='{IMGS_PATH}/{name}.qcow2'/>
+          <source file='{imgs_path}/{name}.qcow2'/>
           <target dev='vda' bus='virtio'/>
           <address type='pci' domain='0x0000' bus='0x00' slot='0x04' function='0x0'/>
         </disk>
@@ -30,4 +27,3 @@ def generate_timesrv_xml(name: str) -> str:
       </devices>
     </domain>
     """
-
