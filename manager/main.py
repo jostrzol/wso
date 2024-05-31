@@ -2,7 +2,7 @@ import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket
-from pydantic import UUID4
+from pydantic import UUID4, IPvAnyAddress
 from rich.console import Console
 from rich.table import Table
 
@@ -60,8 +60,9 @@ async def websocket_endpoint(token: UUID4, websocket: WebSocket):
 
 
 @app.get("/create_time/{name}")
-async def create_vm(name: str):
-    manager.create_new_vm(name, "timesrv")
+async def create_vm(name: str, ip: str):
+    ip_pydantic = IPvAnyAddress(ip)
+    manager.create_new_vm(name, ip_pydantic, "timesrv")
 
 
 @app.get("/ip/{domain_name}")

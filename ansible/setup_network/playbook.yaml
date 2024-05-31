@@ -1,0 +1,21 @@
+- name: Configure network interface on Alpine Linux
+  hosts: "{{ curr_ip }}"
+  become: yes
+  vars:
+    ansible_user: root
+    ansible_ssh_pass: root
+    ansible_become: false
+    interface: eth0
+
+  tasks:
+    - name: Configure /etc/network/interfaces for static IP
+      template:
+        src: interfaces.j2
+        dest: /etc/network/interfaces
+      notify: Restart networking
+
+  handlers:
+    - name: Restart networking
+      command: /etc/init.d/networking restart
+      async: 1
+      poll: 0

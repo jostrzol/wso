@@ -9,13 +9,17 @@ from typing import Any, Iterable, cast
 from uuid import uuid4
 
 import libvirt
-from pydantic import BaseModel, Field, UUID4
+from pydantic import BaseModel, Field, UUID4, IPvAnyAddress
+import os
+
+from time import time
 
 from .config import Config, ManagerConfig
 from .plan import Plan, VMConfig
 from .repository import repository
 from .settings import settings
 from .utils import generate_timesrv_xml
+
 
 logger = logging.getLogger("uvicorn")
 
@@ -248,11 +252,42 @@ class Manager:
 
         return ifaces["eth0"]["addrs"][0]["addr"]
 
-    def create_new_vm(self, name: str, service: str):
-        if service == "timesrv":
-            self._create_timesrv_vm(name)
+    def is_fully_booted(self, name: str):
+        try:
+            dom = self._conn.lookupByName(name)
+            if dom.isActive():
+                result = subprocess.run(
+                    [
+                        "virsh",
+                        "qemu-agent-command",
+                        name,
+                        '{"execute":"guest-ping"}',
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
 
-    def _create_timesrv_vm(self, name: str):
+                print(result.stdout)
+                if "return" in result.stdout:
+                    return True
+        except libvirt.libvirtError:
+            pass
+
+        return False
+
+    async def wait_until_fully_booted(self, name: str, timeout: int = 300):
+        start = time()
+        while time() - start < timeout:
+            if self.is_fully_booted(name):
+                return True
+            await asyncio.sleep(5)
+        raise Exception("Timed out waiting for VM to fully boot")
+
+    async def wait_and_setup_ip(self, name: str, ip: IPvAnyAddress):
+        await self.wait_until_fully_booted(name)
+        self._setup_ip(name, ip)
+
+    def _create_timesrv_vm(self, ip: IPvAnyAddress, name: str):
         subprocess.run(
             ["cp", f"{self.imgs_path}/timesrv.qcow2", f"{self.imgs_path}/{name}.qcow2"],
             check=True,
@@ -262,6 +297,32 @@ class Manager:
             self._conn.createXML(generate_timesrv_xml(self.imgs_path, name), 0)
         except libvirt.libvirtError as e:
             raise Exception(f"Failed to create VM: {e}")
+
+        dom = self._conn.lookupByName(name)
+
+        asyncio.create_task(self.wait_and_setup_ip(name, ip))
+
+
+    def _setup_ip(self, name: str, new_ip: IPvAnyAddress):
+        curr_ip = self.get_ip(name)
+
+        res = subprocess.run(
+                    [
+                        "ansible-playbook",
+                        "-i",
+                        f"{curr_ip},",
+                        f"{self.imgs_path}/../ansible/setup_network/playbook.yaml",
+                        "-e",
+                        f"curr_ip={curr_ip} new_ip={new_ip}",
+                    ],
+                    env={**os.environ, "ANSIBLE_HOST_KEY_CHECKING": "False"},
+                    check=True,
+        )
+
+        if res.returncode != 0:
+            raise Exception("Failed to setup IP")
+
+
 
     def delete_vm(self, name: str):
         try:
@@ -274,6 +335,9 @@ class Manager:
         except libvirt.libvirtError as e:
             raise Exception(f"Failed to delete VM: {e}")
 
+    def create_new_vm(self, name: str, ip: IPvAnyAddress, service: str):
+        if service == "timesrv":
+            self._create_timesrv_vm(ip, name)
 
 class ConnectionStatus(BaseModel):
     planned_at: datetime = Field(default_factory=datetime.now)
