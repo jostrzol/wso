@@ -33,7 +33,7 @@ class Manager:
         config = await repository.get_config()
         plan = await repository.get_plan()
         manager = cls(name=name, config=config, plan=plan)
-        await manager._on_config_changed(config)
+        plan = await manager._on_config_changed(config)
         await manager._on_plan_changed(plan)
         return manager
 
@@ -73,7 +73,7 @@ class Manager:
                 self._statuses[token] = status
         return status
 
-    async def execute_plan_forever(self):
+    async def correct_plans_forever(self):
         while True:
             for vm in self.my_vms():
                 status = self.status(vm.token)
@@ -106,14 +106,17 @@ class Manager:
 
     async def _on_config_changed(
         self, config: Config, old_config: Config | None = None
-    ):
+    ) -> Plan:
         self._config = config
         old_managers = old_config.managers if old_config else None
         self._update_manager_statuses(config.managers, old_managers)
 
         new_plan = self._remake_plan(self._plan)
         if new_plan is not self._plan:
-            await repository.save_plan(new_plan)
+            did_change = await repository.save_plan(new_plan)
+            if did_change:
+                return new_plan
+        return self._plan
 
     def _update_manager_statuses(
         self,
@@ -129,11 +132,12 @@ class Manager:
         for mgr in to_create:
             self._statuses[mgr.token] = ConnectionStatus()
         for mgr in to_delete:
-            self._statuses.pop(mgr.token)
+            self._statuses.pop(mgr.token, None)
 
     def _remake_plan(self, current_plan: Plan) -> Plan:
         new_vms = []
         changed = False
+        print(self._config.services)
         for service in self._config.services:
             vms = current_plan.for_service(service.name)
             delta = service.replicas - len(vms)
@@ -167,6 +171,8 @@ class Manager:
         self._plan = plan
         new_vms = list(self.my_vms(plan.vms))
         old_vms = list(self.list_current_vms())
+        print(old_vms)
+        print(new_vms)
         new_vm_names = {vm.name for vm in new_vms}
         old_vm_names = {vm.name for vm in old_vms}
         to_create = [vm for vm in new_vms if vm.name not in old_vm_names]
@@ -195,7 +201,7 @@ class Manager:
             self.delete_vm(vm.name)
 
         await asyncio.to_thread(impl)
-        self._statuses.pop(vm.token)
+        self._statuses.pop(vm.token, None)
 
     def other_managers(self) -> Iterable[ManagerConfig]:
         yield from (
