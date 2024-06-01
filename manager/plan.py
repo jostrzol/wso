@@ -20,8 +20,13 @@ class VMConfig(BaseModel):
     service: str
     manager: str
     address: IPv4Address
+    port: int
     token: UUID4
 
     @property
     def name(self):
         return f"wso-{self.service}-{self.manager}-{self.token}"
+
+    @property
+    def host(self):
+        return f"{self.address}:{self.port}"

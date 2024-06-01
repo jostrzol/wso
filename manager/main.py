@@ -27,7 +27,7 @@ async def print_status():
             table.add_row("Manager", mgr.name, mgr.host, delta)
         for vm, status in manager.vm_statuses():
             delta = format_last_beat(status)
-            table.add_row("VM", vm.name, str(vm.address), delta)
+            table.add_row("VM", vm.name, vm.host, delta)
         console.print(table)
 
 
@@ -66,8 +66,8 @@ async def create_vm(name: str, ip: IPv4Address):
 
 
 @app.get("/ip/{domain_name}")
-def get_ip(domain_name: str):
-    return {"ip": manager._vmm.get_ip(domain_name)}
+async def get_ip(domain_name: str):
+    return {"ip": await manager._vmm.get_ip(domain_name)}
 
 
 @app.get("/delete/{name}")

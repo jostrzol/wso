@@ -173,6 +173,7 @@ class Manager:
                         service=service.name,
                         manager=manager.name,
                         address=ip,
+                        port=service.port,
                         token=uuid4(),
                     )
                 )
@@ -210,7 +211,7 @@ class Manager:
         logger.info(f"starting VM {vm.name}")
         await self._vmm.create_new_vm(vm)
         logger.info(f"VM {vm.name} active")
-        await self._vmm._start_timesrv(vm)
+        await self._vmm.start_timesrv(vm)
         status = ConnectionStatus()
         self._statuses[vm.token] = status
 
