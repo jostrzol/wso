@@ -1,3 +1,5 @@
+import os
+
 def generate_timesrv_xml(imgs_path: str, name: str) -> str:
     return f"""
     <domain type='kvm'>
@@ -27,3 +29,44 @@ def generate_timesrv_xml(imgs_path: str, name: str) -> str:
       </devices>
     </domain>
     """
+
+def generate_nginx_conf(server_ips, imgs_path):
+    server_block = "\n".join([f"    server {ip};" for ip in server_ips])
+
+    nginx_conf = f"""
+    user nginx;
+
+    worker_processes auto;
+
+    pcre_jit on;
+
+    error_log /var/log/nginx/error.log warn;
+
+    include /etc/nginx/modules/*.conf;
+
+    include /etc/nginx/conf.d/*.conf;
+
+    events {{
+      worker_connections 1024;
+    }}
+
+    http {{
+        upstream backend {{
+      {server_block}
+        }}
+
+        server {{
+            listen 80;
+
+            location / {{
+                proxy_pass http://backend;
+            }}
+        }}
+    }}
+    """
+
+    with open(f"{imgs_path}/../ansible/setup_nginx/nginx.conf", 'w') as f:
+        f.write(nginx_conf)
+
+if __name__ == "__main__":
+  generate_nginx_conf(["192.168.122.91"], "/home/kuba/Studia/mgr/proj/wso/imgs")

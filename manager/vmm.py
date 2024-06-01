@@ -10,7 +10,7 @@ from pydantic import UUID4
 
 from manager.config import ManagerConfig
 from manager.plan import VMConfig
-from manager.utils import generate_timesrv_xml
+from manager.utils import generate_timesrv_xml, generate_nginx_conf
 
 
 class VMManager:
@@ -109,6 +109,28 @@ class VMManager:
         await asyncio.to_thread(impl)
         await self.wait_and_setup_ip(vm)
 
+    async def _create_nginx_vm(self, vm: VMConfig):
+        def impl():
+            subprocess.run(
+                [
+                    "cp",
+                    f"{self.imgs_path}/nginx.qcow2",
+                    f"{self.imgs_path}/{vm.name}.qcow2",
+                ],
+                check=True,
+            )
+
+            try:
+                self._conn.createXML(generate_timesrv_xml(self.imgs_path, vm.name), 0)
+            except libvirt.libvirtError as e:
+                raise Exception(f"Failed to create VM: {e}")
+
+            self._conn.lookupByName(vm.name)
+
+        await asyncio.to_thread(impl)
+        await self.wait_and_setup_ip(vm)
+        self._setup_nginx(vm)
+
     async def _setup_ip(self, vm: VMConfig):
         def impl():
             curr_ip = self.get_ip(vm.name)
@@ -130,6 +152,35 @@ class VMManager:
                 raise Exception("Failed to setup IP")
 
         await asyncio.to_thread(impl)
+
+    def _setup_nginx(self, vm: VMConfig):
+        server_ips = [
+            vm.address
+            for vm in self.list_current_vms()
+            if vm.service == "timesrv"
+        ]
+
+        generate_nginx_conf(server_ips, self.imgs_path)
+
+        def impl():
+            res = subprocess.run(
+                [
+                    "ansible-playbook",
+                    "-i",
+                    f"{vm.address},",
+                    f"{self.imgs_path}/../ansible/setup_nginx/playbook.yaml",
+                    "-e",
+                    f"ip={vm.address}",
+
+                ],
+                env={**os.environ, "ANSIBLE_HOST_KEY_CHECKING": "False"},
+                check=True,
+            )
+
+            if res.returncode != 0:
+                raise Exception("Failed to setup nginx")
+
+        asyncio.to_thread(impl)
 
     async def _start_timesrv(self, vm: VMConfig):
         def impl():
@@ -165,3 +216,5 @@ class VMManager:
     async def create_new_vm(self, vm: VMConfig):
         if vm.service == "timesrv":
             await self._create_timesrv_vm(vm)
+        if vm.service == "nginx":
+            await self._create_nginx_vm(vm)
