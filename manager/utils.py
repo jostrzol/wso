@@ -1,4 +1,7 @@
-def generate_timesrv_xml(imgs_path: str, name: str) -> str:
+from pathlib import Path
+
+
+def vm_conf(imgs_path: Path, name: str) -> str:
     return f"""
     <domain type='kvm'>
       <name>{name}</name>
@@ -70,4 +73,3 @@ def generate_nginx_conf(server_ips, imgs_path):
 
 if __name__ == "__main__":
     generate_nginx_conf(["192.168.122.91"], "/home/kuba/Studia/mgr/proj/wso/imgs")
-

@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, UUID4
 from heart.heart import Heart
 from manager.vmm import VMManager
 
-from .config import Config, ManagerConfig
+from .config import Config, ManagerConfig, ServiceConfig
 from .plan import Plan, VMConfig
 from .repository import repository
 from .settings import settings
@@ -208,19 +208,22 @@ class Manager:
         } | self._statuses
 
     async def _create_vm(self, vm: VMConfig):
+        service = self._service_for(vm)
         logger.info(f"starting VM {vm.name}")
-        await self._vmm.create_new_vm(vm)
+        await self._vmm.create_new_vm(vm, service)
         logger.info(f"VM {vm.name} active")
-        await self._vmm.start_timesrv(vm)
         status = ConnectionStatus()
         self._statuses[vm.token] = status
 
-    async def _delete_vm(self, vm: VMConfig):
-        def impl():
-            logger.info(f"deleting VM {vm.name}")
-            self._vmm.delete_vm(vm.name)
+    def _service_for(self, vm: VMConfig) -> ServiceConfig:
+        for service in self._config.services:
+            if service.name == vm.service:
+                return service
+        raise KeyError(f"service '{vm.service}' for VM {vm.name} not found")
 
-        await asyncio.to_thread(impl)
+    async def _delete_vm(self, vm: VMConfig):
+        logger.info(f"deleting VM {vm.name}")
+        await self._vmm.delete_vm(vm.name)
         self._statuses.pop(vm.token, None)
 
     @property
