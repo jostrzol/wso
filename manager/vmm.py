@@ -129,7 +129,7 @@ class VMManager:
 
         await asyncio.to_thread(impl)
         await self.wait_and_setup_ip(vm)
-        self._setup_nginx(vm)
+        await self._setup_nginx(vm)
 
     async def _setup_ip(self, vm: VMConfig):
         def impl():
@@ -153,7 +153,7 @@ class VMManager:
 
         await asyncio.to_thread(impl)
 
-    def _setup_nginx(self, vm: VMConfig):
+    async def _setup_nginx(self, vm: VMConfig):
         server_ips = [
             vm.address
             for vm in self.list_current_vms()
@@ -180,7 +180,7 @@ class VMManager:
             if res.returncode != 0:
                 raise Exception("Failed to setup nginx")
 
-        asyncio.to_thread(impl)
+        await asyncio.to_thread(impl)
 
     async def _start_timesrv(self, vm: VMConfig):
         def impl():
