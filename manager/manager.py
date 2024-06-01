@@ -2,25 +2,19 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 import logging
-import os
 import random
-import re
-import subprocess
-from time import time
 from typing import Any, Iterable, cast
 from uuid import uuid4
 
-import libvirt
 from pydantic import BaseModel, Field, UUID4
-from ipaddress import IPv4Address
 
 from heart.heart import Heart
+from manager.vmm import VMManager
 
 from .config import Config, ManagerConfig
 from .plan import Plan, VMConfig
 from .repository import repository
 from .settings import settings
-from .utils import generate_timesrv_xml
 
 
 logger = logging.getLogger("uvicorn")
@@ -32,8 +26,8 @@ class Manager:
         self._config = config
         self._plan = plan
         self._statuses: dict[UUID4, ConnectionStatus] = {}
-        self._conn = libvirt.open("qemu:///system")
         self._hearts: dict[UUID4, Heart] = {}
+        self._vmm = VMManager(self.my_config)
 
     @classmethod
     async def create(cls, name: str):
@@ -43,10 +37,6 @@ class Manager:
         plan = await manager._on_config_changed(config)
         await manager._on_plan_changed(plan)
         return manager
-
-    @property
-    def config(self):
-        return self._config
 
     def hearbeat(self, token: UUID4) -> bool:
         status = self._statuses.get(token)
@@ -115,6 +105,8 @@ class Manager:
         self, config: Config, old_config: Config | None = None
     ) -> Plan:
         self._config = config
+        self._vmm.config = self.my_config
+
         old_managers = old_config.managers if old_config else None
         self._on_managers_changed(config.managers, old_managers)
 
@@ -183,7 +175,7 @@ class Manager:
     async def _on_plan_changed(self, plan: Plan):
         self._plan = plan
         new_vms = list(self.my_vms(plan.vms))
-        old_vms = list(self.list_current_vms())
+        old_vms = list(self._vmm.list_current_vms())
         new_vm_names = {vm.name for vm in new_vms}
         old_vm_names = {vm.name for vm in old_vms}
         to_create = [vm for vm in new_vms if vm.name not in old_vm_names]
@@ -198,7 +190,7 @@ class Manager:
 
     async def _create_vm(self, vm: VMConfig):
         logger.info(f"starting VM {vm.name}")
-        await self.create_new_vm(vm.name, vm.address, vm.service)
+        await self._vmm.create_new_vm(vm.name, vm.address, vm.service)
         logger.info(f"VM {vm.name} active")
         status = ConnectionStatus()
         self._statuses[vm.token] = status
@@ -206,14 +198,10 @@ class Manager:
     async def _delete_vm(self, vm: VMConfig):
         def impl():
             logger.info(f"deleting VM {vm.name}")
-            self.delete_vm(vm.name)
+            self._vmm.delete_vm(vm.name)
 
         await asyncio.to_thread(impl)
         self._statuses.pop(vm.token, None)
-
-    @property
-    def imgs_path(self) -> str:
-        return str(self.my_config.imgs_path)
 
     @property
     def token(self) -> UUID4:
@@ -230,130 +218,13 @@ class Manager:
         self, mgrs: Iterable[ManagerConfig] | None = None
     ) -> Iterable[ManagerConfig]:
         if mgrs is None:
-            mgrs = self.config.managers
+            mgrs = self._config.managers
         yield from (mgr for mgr in mgrs if mgr.name != self._name)
 
     def my_vms(self, vms: Iterable[VMConfig] | None = None) -> Iterable[VMConfig]:
         if vms is None:
             vms = self._plan.vms
         yield from (vm for vm in vms if vm.manager == self._name)
-
-    VM_NAME_REGEX = re.compile(
-        r"^wso-(.*)-(.*)-"
-        r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
-    )
-
-    def list_current_vms(self) -> Iterable[VMConfig]:
-        for domain in self._conn.listAllDomains():
-            match = re.match(self.VM_NAME_REGEX, domain.name())
-            if match is None:
-                continue
-            service, manager, token = match.groups()
-            if manager != self._name:
-                continue
-            yield VMConfig(
-                service=service,
-                manager=manager,
-                address=cast(Any, "127.0.0.1"),
-                token=UUID4(token),
-            )
-
-    def get_ip(self, domain_name: str):
-        domain = self._conn.lookupByName(domain_name)
-        ifaces = domain.interfaceAddresses(
-            libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_AGENT, 0
-        )
-
-        return ifaces["eth0"]["addrs"][0]["addr"]
-
-    def is_fully_booted(self, name: str):
-        try:
-            dom = self._conn.lookupByName(name)
-            if dom.isActive():
-                result = subprocess.run(
-                    [
-                        "virsh",
-                        "qemu-agent-command",
-                        name,
-                        '{"execute":"guest-ping"}',
-                    ],
-                    capture_output=True,
-                    text=True,
-                )
-
-                if "return" in result.stdout:
-                    return True
-        except libvirt.libvirtError:
-            pass
-
-        return False
-
-    async def wait_until_fully_booted(self, name: str, timeout: int = 300):
-        start = time()
-        while time() - start < timeout:
-            if self.is_fully_booted(name):
-                return True
-            await asyncio.sleep(5)
-        raise Exception("Timed out waiting for VM to fully boot")
-
-    async def wait_and_setup_ip(self, name: str, ip: IPv4Address):
-        await self.wait_until_fully_booted(name)
-        self._setup_ip(name, ip)
-
-    async def _create_timesrv_vm(self, ip: IPv4Address, name: str):
-        def impl():
-            subprocess.run(
-                [
-                    "cp",
-                    f"{self.imgs_path}/timesrv.qcow2",
-                    f"{self.imgs_path}/{name}.qcow2",
-                ],
-                check=True,
-            )
-
-            try:
-                self._conn.createXML(generate_timesrv_xml(self.imgs_path, name), 0)
-            except libvirt.libvirtError as e:
-                raise Exception(f"Failed to create VM: {e}")
-
-            self._conn.lookupByName(name)
-
-        await asyncio.to_thread(impl)
-        await self.wait_and_setup_ip(name, ip)
-
-    def _setup_ip(self, name: str, new_ip: IPv4Address):
-        curr_ip = self.get_ip(name)
-
-        res = subprocess.run(
-            [
-                "ansible-playbook",
-                "-i",
-                f"{curr_ip},",
-                f"{self.imgs_path}/../ansible/setup_network/playbook.yaml",
-                "-e",
-                f"curr_ip={curr_ip} new_ip={new_ip}",
-            ],
-            env={**os.environ, "ANSIBLE_HOST_KEY_CHECKING": "False"},
-            check=True,
-        )
-
-        if res.returncode != 0:
-            raise Exception("Failed to setup IP")
-
-    def delete_vm(self, name: str):
-        try:
-            dom = self._conn.lookupByName(name)
-
-            if dom.isActive():
-                dom.destroy()
-
-            subprocess.run(["rm", f"{self.imgs_path}/{name}.qcow2"], check=True)
-        except libvirt.libvirtError as e:
-            raise Exception(f"Failed to delete VM: {e}")
-
-    async def create_new_vm(self, name: str, ip: IPv4Address, service: str):
-        if service == "timesrv":
-            await self._create_timesrv_vm(ip, name)
 
 
 class ConnectionStatus(BaseModel):
