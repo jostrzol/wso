@@ -1,6 +1,7 @@
 from __future__ import annotations
+from ipaddress import IPv4Address
 
-from pydantic import BaseModel, Field, IPvAnyAddress, UUID4
+from pydantic import BaseModel, Field, UUID4
 
 
 class Plan(BaseModel):
@@ -18,7 +19,7 @@ class Plan(BaseModel):
 class VMConfig(BaseModel):
     service: str
     manager: str
-    address: IPvAnyAddress
+    address: IPv4Address
     token: UUID4
 
     @property

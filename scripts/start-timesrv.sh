@@ -1,5 +1,8 @@
 #!/usr/bin/sh
 
+config=$(mongosh wso -f ./scripts/config.js)
+port=$(echo "$config" | jq  ".services.[] | select(.name == \"timesrv\") | .port")
+
 manager_name="$1"
 vms=$(mongosh wso -f ./scripts/plan.js | jq '.vms')
 
@@ -16,9 +19,9 @@ vm=$(echo "$vms" | jq ".[$i]" -r)
 token=$(echo "$vm" | jq '.token' -r)
 
 manager_name=$(echo "$vm" | jq '.manager' -r)
-manager=$(mongosh wso -f ./scripts/config.js | jq ".managers.[] | select(.name == \"$manager_name\")")
+manager=$(echo "$config" | jq ".managers.[] | select(.name == \"$manager_name\")")
 manager_address="$(echo "$manager" | jq '.address' -r):$(echo "$manager" | jq '.port' -r)"
 
 WSOTIMESRV_MANAGER_ADDRESS="$manager_address" \
   WSOTIMESRV_TOKEN="$token" \
-  fastapi dev ./timesrv/main.py --port 8080
+  fastapi dev ./timesrv/main.py --port "$port"

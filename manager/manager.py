@@ -2,17 +2,17 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 import logging
+import os
 import random
 import re
 import subprocess
+from time import time
 from typing import Any, Iterable, cast
 from uuid import uuid4
 
 import libvirt
-from pydantic import BaseModel, Field, UUID4, IPvAnyAddress
-import os
-
-from time import time
+from pydantic import BaseModel, Field, UUID4
+from ipaddress import IPv4Address
 
 from heart.heart import Heart
 
@@ -140,7 +140,7 @@ class Manager:
         to_delete = [mgr for mgr in old_managers if mgr.token not in new_mgr_tokens]
         for mgr in to_create:
             self._statuses[mgr.token] = ConnectionStatus()
-            logger.warn(f"making heart {mgr.token}")
+            logger.info(f"making heart {mgr.token}")
             heart = Heart(mgr.host, str(self.token))
             asyncio.create_task(heart.beat_until(lambda: mgr.token in self._hearts))
             self._hearts[mgr.token] = heart
@@ -197,12 +197,9 @@ class Manager:
         } | self._statuses
 
     async def _create_vm(self, vm: VMConfig):
-        def impl():
-            logger.info(f"starting VM {vm.name}")
-            self.create_new_vm(vm.name, vm.service)
-            logger.info(f"VM {vm.name} active")
-
-        await asyncio.to_thread(impl)
+        logger.info(f"starting VM {vm.name}")
+        await self.create_new_vm(vm.name, vm.address, vm.service)
+        logger.info(f"VM {vm.name} active")
         status = ConnectionStatus()
         self._statuses[vm.token] = status
 
@@ -284,7 +281,6 @@ class Manager:
                     text=True,
                 )
 
-                print(result.stdout)
                 if "return" in result.stdout:
                     return True
         except libvirt.libvirtError:
@@ -300,46 +296,49 @@ class Manager:
             await asyncio.sleep(5)
         raise Exception("Timed out waiting for VM to fully boot")
 
-    async def wait_and_setup_ip(self, name: str, ip: IPvAnyAddress):
+    async def wait_and_setup_ip(self, name: str, ip: IPv4Address):
         await self.wait_until_fully_booted(name)
         self._setup_ip(name, ip)
 
-    def _create_timesrv_vm(self, ip: IPvAnyAddress, name: str):
-        subprocess.run(
-            ["cp", f"{self.imgs_path}/timesrv.qcow2", f"{self.imgs_path}/{name}.qcow2"],
-            check=True,
-        )
+    async def _create_timesrv_vm(self, ip: IPv4Address, name: str):
+        def impl():
+            subprocess.run(
+                [
+                    "cp",
+                    f"{self.imgs_path}/timesrv.qcow2",
+                    f"{self.imgs_path}/{name}.qcow2",
+                ],
+                check=True,
+            )
 
-        try:
-            self._conn.createXML(generate_timesrv_xml(self.imgs_path, name), 0)
-        except libvirt.libvirtError as e:
-            raise Exception(f"Failed to create VM: {e}")
+            try:
+                self._conn.createXML(generate_timesrv_xml(self.imgs_path, name), 0)
+            except libvirt.libvirtError as e:
+                raise Exception(f"Failed to create VM: {e}")
 
-        dom = self._conn.lookupByName(name)
+            self._conn.lookupByName(name)
 
-        asyncio.create_task(self.wait_and_setup_ip(name, ip))
+        await asyncio.to_thread(impl)
+        await self.wait_and_setup_ip(name, ip)
 
-
-    def _setup_ip(self, name: str, new_ip: IPvAnyAddress):
+    def _setup_ip(self, name: str, new_ip: IPv4Address):
         curr_ip = self.get_ip(name)
 
         res = subprocess.run(
-                    [
-                        "ansible-playbook",
-                        "-i",
-                        f"{curr_ip},",
-                        f"{self.imgs_path}/../ansible/setup_network/playbook.yaml",
-                        "-e",
-                        f"curr_ip={curr_ip} new_ip={new_ip}",
-                    ],
-                    env={**os.environ, "ANSIBLE_HOST_KEY_CHECKING": "False"},
-                    check=True,
+            [
+                "ansible-playbook",
+                "-i",
+                f"{curr_ip},",
+                f"{self.imgs_path}/../ansible/setup_network/playbook.yaml",
+                "-e",
+                f"curr_ip={curr_ip} new_ip={new_ip}",
+            ],
+            env={**os.environ, "ANSIBLE_HOST_KEY_CHECKING": "False"},
+            check=True,
         )
 
         if res.returncode != 0:
             raise Exception("Failed to setup IP")
-
-
 
     def delete_vm(self, name: str):
         try:
@@ -352,9 +351,10 @@ class Manager:
         except libvirt.libvirtError as e:
             raise Exception(f"Failed to delete VM: {e}")
 
-    def create_new_vm(self, name: str, ip: IPvAnyAddress, service: str):
+    async def create_new_vm(self, name: str, ip: IPv4Address, service: str):
         if service == "timesrv":
-            self._create_timesrv_vm(ip, name)
+            await self._create_timesrv_vm(ip, name)
+
 
 class ConnectionStatus(BaseModel):
     planned_at: datetime = Field(default_factory=datetime.now)

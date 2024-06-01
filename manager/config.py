@@ -1,7 +1,8 @@
 from __future__ import annotations
 from datetime import timedelta
+from ipaddress import IPv4Address
 
-from pydantic import UUID4, BaseModel, IPvAnyAddress
+from pydantic import BaseModel, UUID4
 
 
 class Config(BaseModel):
@@ -16,7 +17,7 @@ class GeneralSettings(BaseModel):
 
 class ManagerConfig(BaseModel):
     name: str
-    address: IPvAnyAddress
+    address: IPv4Address
     port: int = 8000
     token: UUID4
     imgs_path: str
