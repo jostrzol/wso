@@ -70,36 +70,52 @@ class Manager:
                 self._statuses[token] = status
         return status
 
-    async def correct_plans_forever(self):
+    async def background_loop(self):
+        await asyncio.gather(
+            self._watch_plan_changes(),
+            self._watch_config_changes(),
+            self._correct_plans_forever(),
+        )
+
+    async def _correct_plans_forever(self):
         while True:
-            for vm in self.my_vms():
-                status = self.status(vm.token)
-                if status is None:
-                    continue
-                if status.is_dead:
-                    logger.error(f"VM {vm.name} is dead")
-                    new_plan = self._remake_plan(self._plan.with_vm_removed(vm.name))
-                    await repository.save_plan(new_plan)
-            for manager in self.other_managers():
-                status = self.status(manager.token)
-                if status is None:
-                    continue
-                if status.is_dead:
-                    logger.error(f"Manager {manager.name} #{manager.token} is dead")
+            try:
+                await self._correct_plans_once()
+            except Exception:
+                logger.exception("correcting plans")
             await asyncio.sleep(1)
 
-    async def watch_changes_forever(self):
-        await asyncio.gather(self._watch_plan_changes(), self._watch_config_changes())
+    async def _correct_plans_once(self):
+        for vm in self.my_vms():
+            status = self.status(vm.token)
+            if status is None:
+                continue
+            if status.is_dead:
+                logger.error(f"VM {vm.name} is dead")
+                new_plan = self._remake_plan(self._plan.with_vm_removed(vm.name))
+                await repository.save_plan(new_plan)
+        for manager in self.other_managers():
+            status = self.status(manager.token)
+            if status is None:
+                continue
+            if status.is_dead:
+                logger.error(f"Manager {manager.name} #{manager.token} is dead")
 
     async def _watch_plan_changes(self):
         async for plan in repository.watch_plan():
-            logger.info(f"plan changed, current version: {plan.version}")
-            await self._on_plan_changed(plan)
+            try:
+                logger.info(f"plan changed, current version: {plan.version}")
+                await self._on_plan_changed(plan)
+            except Exception:
+                logger.exception("handling plan change")
 
     async def _watch_config_changes(self):
         async for config in repository.watch_config():
-            logger.info("config changed")
-            await self._on_config_changed(config, self._config)
+            try:
+                logger.info("config changed")
+                await self._on_config_changed(config, self._config)
+            except Exception:
+                logger.exception("handling config change")
 
     async def _on_config_changed(
         self, config: Config, old_config: Config | None = None
@@ -141,7 +157,7 @@ class Manager:
             self._hearts.pop(mgr.token, None)
 
     def _remake_plan(self, current_plan: Plan) -> Plan:
-        new_vms = []
+        new_vms: list[VMConfig] = []
         changed = False
         for service in self._config.services:
             vms = current_plan.for_service(service.name)
@@ -150,11 +166,13 @@ class Manager:
                 changed = True
             for _ in range(delta):
                 manager = self._assign_host_for_new_vm()
+                ips_taken = (vm.address for vm in [*vms, *new_vms, *current_plan.vms])
+                ip = manager.address_pool.generate_one_not_in(ips_taken)
                 vms.append(
                     VMConfig(
                         service=service.name,
                         manager=manager.name,
-                        address=cast(Any, "127.0.0.1"),
+                        address=ip,
                         token=uuid4(),
                     )
                 )
@@ -190,8 +208,9 @@ class Manager:
 
     async def _create_vm(self, vm: VMConfig):
         logger.info(f"starting VM {vm.name}")
-        await self._vmm.create_new_vm(vm.name, vm.address, vm.service)
+        await self._vmm.create_new_vm(vm)
         logger.info(f"VM {vm.name} active")
+        await self._vmm._start_timesrv(vm)
         status = ConnectionStatus()
         self._statuses[vm.token] = status
 

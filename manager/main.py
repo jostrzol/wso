@@ -20,13 +20,14 @@ async def print_status():
         table = Table(show_footer=False)
         table.add_column("Type")
         table.add_column("Name")
+        table.add_column("Address")
         table.add_column("Last beat before", justify="right")
         for mgr, status in manager.manager_statuses():
             delta = format_last_beat(status)
-            table.add_row("Manager", mgr.name, delta)
+            table.add_row("Manager", mgr.name, mgr.host, delta)
         for vm, status in manager.vm_statuses():
             delta = format_last_beat(status)
-            table.add_row("VM", vm.name, delta)
+            table.add_row("VM", vm.name, str(vm.address), delta)
         console.print(table)
 
 
@@ -42,8 +43,7 @@ async def lifespan(_: FastAPI):
     global manager
     manager = await Manager.create(name=settings.manager_name)
     asyncio.create_task(print_status())
-    asyncio.create_task(manager.watch_changes_forever())
-    asyncio.create_task(manager.correct_plans_forever())
+    asyncio.create_task(manager.background_loop())
     yield
 
 

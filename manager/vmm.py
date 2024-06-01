@@ -76,79 +76,80 @@ class VMManager:
 
         return False
 
-    async def wait_until_fully_booted(self, name: str, timeout: int = 300):
+    async def wait_until_fully_booted(self, vm: VMConfig, timeout: int = 300):
         start = time()
         while time() - start < timeout:
-            if self.is_fully_booted(name):
+            if self.is_fully_booted(vm.name):
                 return True
             await asyncio.sleep(5)
         raise Exception("Timed out waiting for VM to fully boot")
 
-    async def wait_and_setup_ip(self, name: str, ip: IPv4Address):
-        await self.wait_until_fully_booted(name)
-        self._setup_ip(name, ip)
+    async def wait_and_setup_ip(self, vm: VMConfig):
+        await self.wait_until_fully_booted(vm)
+        await self._setup_ip(vm)
 
-    async def _create_timesrv_vm(self, ip: IPv4Address, name: str):
+    async def _create_timesrv_vm(self, vm: VMConfig):
         def impl():
             subprocess.run(
                 [
                     "cp",
                     f"{self.imgs_path}/timesrv.qcow2",
-                    f"{self.imgs_path}/{name}.qcow2",
+                    f"{self.imgs_path}/{vm.name}.qcow2",
                 ],
                 check=True,
             )
 
             try:
-                self._conn.createXML(generate_timesrv_xml(self.imgs_path, name), 0)
+                self._conn.createXML(generate_timesrv_xml(self.imgs_path, vm.name), 0)
             except libvirt.libvirtError as e:
                 raise Exception(f"Failed to create VM: {e}")
 
-            self._conn.lookupByName(name)
+            self._conn.lookupByName(vm.name)
 
         await asyncio.to_thread(impl)
-        await self.wait_and_setup_ip(name, ip)
+        await self.wait_and_setup_ip(vm)
 
-    def _setup_ip(self, name: str, ip: IPv4Address):
-        curr_ip = self.get_ip(name)
+    async def _setup_ip(self, vm: VMConfig):
+        def impl():
+            curr_ip = self.get_ip(vm.name)
 
-        # TODO: jo: możesz pozmieniać args jak zmieniłeś tego managera i ipki
-        token = "todo"
+            res = subprocess.run(
+                [
+                    "ansible-playbook",
+                    "-i",
+                    f"{curr_ip},",
+                    f"{self.imgs_path}/../ansible/setup_network/playbook.yaml",
+                    "-e",
+                    f"curr_ip={curr_ip} new_ip={vm.address}",
+                ],
+                env={**os.environ, "ANSIBLE_HOST_KEY_CHECKING": "False"},
+                check=True,
+            )
 
-        res = subprocess.run(
-            [
-                "ansible-playbook",
-                "-i",
-                f"{ip},",
-                f"{self.imgs_path}/../ansible/run_timesrv/playbook.yaml",
-                "-e",
-                f"ip={ip} wsotimesrv_token={token}",
-            ],
-            env={**os.environ, "ANSIBLE_HOST_KEY_CHECKING": "False"},
-            check=True,
-        )
+            if res.returncode != 0:
+                raise Exception("Failed to setup IP")
 
-        if res.returncode != 0:
-            raise Exception(f"Failed to run timesrv on vm: {name}")
+        await asyncio.to_thread(impl)
 
-    def _start_timesrv(self, name: str):
-        curr_ip = self.get_ip(name)
+    async def _start_timesrv(self, vm: VMConfig):
+        def impl():
+            res = subprocess.run(
+                [
+                    "ansible-playbook",
+                    "-i",
+                    f"{vm.address},",
+                    f"{self.imgs_path}/../ansible/run_timesrv/playbook.yaml",
+                    "-e",
+                    f"ip={self.config.host} wsotimesrv_token={vm.token}",
+                ],
+                env={**os.environ, "ANSIBLE_HOST_KEY_CHECKING": "False"},
+                check=True,
+            )
 
-        res = subprocess.run(
-            [
-                "ansible-playbook",
-                "-i",
-                f"{curr_ip},",
-                f"{self.imgs_path}/../ansible/setup_network/playbook.yaml",
-                "-e",
-                f"curr_ip={curr_ip} new_ip={new_ip}",
-            ],
-            env={**os.environ, "ANSIBLE_HOST_KEY_CHECKING": "False"},
-            check=True,
-        )
+            if res.returncode != 0:
+                raise Exception(f"Failed to run timesrv on vm: {vm.name}")
 
-        if res.returncode != 0:
-            raise Exception("Failed to setup IP")
+        await asyncio.to_thread(impl)
 
     def delete_vm(self, name: str):
         try:
@@ -161,6 +162,6 @@ class VMManager:
         except libvirt.libvirtError as e:
             raise Exception(f"Failed to delete VM: {e}")
 
-    async def create_new_vm(self, name: str, ip: IPv4Address, service: str):
-        if service == "timesrv":
-            await self._create_timesrv_vm(ip, name)
+    async def create_new_vm(self, vm: VMConfig):
+        if vm.service == "timesrv":
+            await self._create_timesrv_vm(vm)
