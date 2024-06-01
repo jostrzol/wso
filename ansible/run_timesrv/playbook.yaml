@@ -1,0 +1,21 @@
+- name: Run timesrv
+  hosts: "{{ ip }}"
+  become: yes
+  vars:
+    ansible_user: root
+    ansible_ssh_pass: root
+    ansible_become: false
+    interface: eth0
+    port: 8080
+
+  tasks:
+    - name: run fastapi
+      ansible.builtin.shell: |
+        nohup fastapi dev ./timesrv/main.py --port {{ port }} > /root/logfile.log 2>&1 &
+      args:
+        chdir: /root/wso
+      environment:
+        WSOTIMESRV_MANAGER_ADDRESS: "192.168.122.1"
+        WSOTIMESRV_TOKEN: "{{ wsotimesrv_token }}"
+      async: 1
+      poll: 0

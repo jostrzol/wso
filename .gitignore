@@ -4,3 +4,4 @@ config.json
 manager_old.py
 *.qcow2
 /env
+.vscode

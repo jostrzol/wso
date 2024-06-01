@@ -109,7 +109,29 @@ class VMManager:
         await asyncio.to_thread(impl)
         await self.wait_and_setup_ip(name, ip)
 
-    def _setup_ip(self, name: str, new_ip: IPv4Address):
+    def _setup_ip(self, name: str, ip: IPv4Address):
+        curr_ip = self.get_ip(name)
+
+        # TODO: jo: możesz pozmieniać args jak zmieniłeś tego managera i ipki
+        token = "todo"
+
+        res = subprocess.run(
+            [
+                "ansible-playbook",
+                "-i",
+                f"{ip},",
+                f"{self.imgs_path}/../ansible/run_timesrv/playbook.yaml",
+                "-e",
+                f"ip={ip} wsotimesrv_token={token}",
+            ],
+            env={**os.environ, "ANSIBLE_HOST_KEY_CHECKING": "False"},
+            check=True,
+        )
+
+        if res.returncode != 0:
+            raise Exception(f"Failed to run timesrv on vm: {name}")
+
+    def _start_timesrv(self, name: str):
         curr_ip = self.get_ip(name)
 
         res = subprocess.run(
