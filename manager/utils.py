@@ -1,3 +1,4 @@
+from ipaddress import IPv4Address
 from pathlib import Path
 
 
@@ -32,7 +33,9 @@ def vm_conf(imgs_path: Path, name: str) -> str:
     """
 
 
-def generate_nginx_conf(server_ips, imgs_path):
+def generate_nginx_conf(
+    server_ips: list[str], imgs_path: Path | str, port: int = 80
+):
     server_block = "\n".join([f"    server {ip};" for ip in server_ips])
 
     nginx_conf = f"""
@@ -58,7 +61,7 @@ def generate_nginx_conf(server_ips, imgs_path):
         }}
 
         server {{
-            listen 80;
+            listen {port};
 
             location / {{
                 proxy_pass http://backend;

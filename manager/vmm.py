@@ -10,8 +10,8 @@ from uuid import UUID
 
 import libvirt
 
-from manager.config import ManagerConfig, ServiceConfig
-from manager.plan import VMConfig
+from manager.config import LBConfig, ManagerConfig, ServiceConfig
+from manager.plan import LoadBalancer, Vm, Worker
 from manager.utils import generate_nginx_conf, vm_conf
 
 from .aiorun import poll, run, run_untill_success
@@ -33,42 +33,53 @@ class VMManager:
         return self.config.name
 
     VM_NAME_REGEX = re.compile(
-        r"^wso-(.*)-(.*)-"
+        r"^wso-(.*)-(.*)-(.*)-"
         r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
     )
 
-    def list_current_vms(self) -> Iterable[VMConfig]:
+    def list_current_vms(self) -> Iterable[Vm]:
         for domain in self._conn.listAllDomains():
             match = re.match(self.VM_NAME_REGEX, domain.name())
             if match is None:
                 continue
-            service, manager, token = match.groups()
+            manager, type, service, token = match.groups()
             if manager != self.name:
                 continue
-            yield VMConfig(
-                service=service,
-                manager=manager,
-                address=IPv4Address("127.0.0.1"),
-                port=0,
-                token=UUID(token),
-            )
+            stubs = {
+                "address": IPv4Address("127.0.0.1"),
+                "port": 0,
+            }
+            match type:
+                case "wrk":
+                    yield Worker(
+                        service=service, manager=manager, token=UUID(token), **stubs
+                    )
+                case "lb":
+                    yield LoadBalancer(
+                        service=service,
+                        manager=manager,
+                        token=UUID(token),
+                        upstream=[],
+                        **stubs,
+                    )
 
-    async def create_new_vm(self, vm: VMConfig, service: ServiceConfig):
-        await self._make_new_vm_image(vm, service)
+    async def create_new_vm(self, vm: Vm, config: ServiceConfig | LBConfig):
+        await self._make_new_vm_image(vm, config)
         await self._make_new_vm(vm)
         await self._wait_for_network_and_setup_ip(vm)
 
-        if vm.service == "timesrv":
-            await self._setup_timesrv(vm)
-        if vm.service == "nginx":
-            await self._setup_nginx(vm)
+        match vm:
+            case LoadBalancer() as lb:
+                await self.setup_nginx(lb)
+            case Worker(service="timesrv") as wrk:
+                await self._setup_timesrv(wrk)
 
-    async def _make_new_vm_image(self, vm: VMConfig, service: ServiceConfig):
+    async def _make_new_vm_image(self, vm: Vm, service: ServiceConfig | LBConfig):
         src_path = self.imgs_path / service.image
         dst_path = (self.imgs_path / vm.name).with_suffix(".qcow2")
         await run(f'cp "{src_path}" "{dst_path}"')
 
-    async def _make_new_vm(self, vm: VMConfig):
+    async def _make_new_vm(self, vm: Vm):
         try:
             xml = vm_conf(self.imgs_path, vm.name)
             await self._create_xml(xml)
@@ -76,7 +87,7 @@ class VMManager:
             raise Exception(f"Failed to create VM: {e}")
         await self._wait_until_fully_booted(vm)
 
-    async def _wait_until_fully_booted(self, vm: VMConfig):
+    async def _wait_until_fully_booted(self, vm: Vm):
         async for _ in poll(timeout=120, interval=5):
             if await self._is_fully_booted(vm.name):
                 return
@@ -95,7 +106,7 @@ class VMManager:
         except libvirt.libvirtError:
             return False
 
-    async def _wait_for_network_and_setup_ip(self, vm: VMConfig):
+    async def _wait_for_network_and_setup_ip(self, vm: Vm):
         curr_ip = await self.get_ip_until_success(vm.name)
         await self._setup_ip(vm, curr_ip)
         await self._wait_ip_reachable(vm.address)
@@ -121,7 +132,7 @@ class VMManager:
         except Exception:
             return None
 
-    async def _setup_ip(self, vm: VMConfig, curr_ip: IPv4Address):
+    async def _setup_ip(self, vm: Vm, curr_ip: IPv4Address):
         await self._ansible(
             playbook="setup_network/playbook.yaml",
             host=curr_ip,
@@ -131,19 +142,17 @@ class VMManager:
     async def _wait_ip_reachable(self, ip: IPv4Address):
         await run_untill_success(f"ping -c 1 {ip}", timeout=20)
 
-    async def _setup_nginx(self, vm: VMConfig):
-        server_ips = [
-            vm.address for vm in self.list_current_vms() if vm.service == "timesrv"
-        ]
+    async def setup_nginx(self, lb: LoadBalancer):
+        upstream = [f"{ip}:{port}" for ip, port in lb.upstream]
 
-        generate_nginx_conf(server_ips, self.imgs_path)
+        generate_nginx_conf(upstream, self.imgs_path, port=lb.port)
         await self._ansible(
             playbook="setup_nginx/playbook.yaml",
-            host=vm.address,
-            variables={"ip": vm.address},
+            host=lb.address,
+            variables={"ip": lb.address},
         )
 
-    async def _setup_timesrv(self, vm: VMConfig):
+    async def _setup_timesrv(self, vm: Vm):
         await self._ansible(
             playbook="run_timesrv/playbook.yaml",
             host=vm.address,

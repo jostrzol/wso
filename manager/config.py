@@ -4,13 +4,20 @@ from functools import cached_property
 from ipaddress import IPv4Address
 from typing import Any, Iterable
 
-from pydantic import BaseModel, UUID4, RootModel, model_validator, root_validator
+from pydantic import BaseModel, UUID4, Field, RootModel, model_validator
 
 
 class Config(BaseModel):
     general: GeneralSettings
-    managers: list[ManagerConfig]
-    services: list[ServiceConfig]
+    managers: list[ManagerConfig] = Field(default_factory=lambda: [])
+    services: list[ServiceConfig] = Field(default_factory=lambda: [])
+    load_balancers: list[LBConfig] = Field(default_factory=lambda: [])
+
+    def service_lb_pairs(self) -> Iterable[tuple[ServiceConfig, LBConfig | None]]:
+        lb_map = {lb.service: lb for lb in self.load_balancers}
+        for service in self.services:
+            lb = lb_map.get(service.name)
+            yield (service, lb)
 
 
 class GeneralSettings(BaseModel):
@@ -35,6 +42,15 @@ class ServiceConfig(BaseModel):
     image: str
     port: int
     replicas: int
+
+
+class LBConfig(BaseModel):
+    service: str
+    port: int
+
+    @property
+    def image(self) -> str:
+        return "nginx.qcow2"
 
 
 class IPv4Range(RootModel[str]):

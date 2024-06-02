@@ -11,8 +11,8 @@ from pydantic import BaseModel, Field, UUID4
 from heart.heart import Heart
 from manager.vmm import VMManager
 
-from .config import Config, ManagerConfig, ServiceConfig
-from .plan import Plan, VMConfig
+from .config import Config, LBConfig, ManagerConfig, ServiceConfig
+from .plan import LoadBalancer, Plan, Vm, Worker
 from .repository import repository
 from .settings import settings
 
@@ -35,7 +35,7 @@ class Manager:
         plan = await repository.get_plan()
         manager = cls(name=name, config=config, plan=plan)
         plan = await manager._on_config_changed(config)
-        await manager._on_plan_changed(plan)
+        asyncio.create_task(manager._on_plan_changed(plan))
         return manager
 
     def hearbeat(self, token: UUID4) -> bool:
@@ -52,7 +52,7 @@ class Manager:
                 continue
             yield (manager, status)
 
-    def vm_statuses(self) -> Iterable[tuple[VMConfig, ConnectionStatus]]:
+    def vm_statuses(self) -> Iterable[tuple[Vm, ConnectionStatus]]:
         for vm in self.my_vms():
             status = self.status(vm.token)
             if status is None:
@@ -92,7 +92,11 @@ class Manager:
                 continue
             if status.is_dead:
                 logger.error(f"VM {vm.name} is dead")
-                new_plan = self._remake_plan(self._plan.with_vm_removed(vm.name))
+                print(self._plan)
+                removed = self._plan.with_vm_removed(vm.name)
+                print(removed)
+                new_plan = self._remake_plan(removed)
+                print(new_plan)
                 await repository.save_plan(new_plan)
         for manager in self.other_managers():
             status = self.status(manager.token)
@@ -157,74 +161,160 @@ class Manager:
             self._hearts.pop(mgr.token, None)
 
     def _remake_plan(self, current_plan: Plan) -> Plan:
-        new_vms: list[VMConfig] = []
+        new_vms: list[Vm] = []
         changed = False
-        for service in self._config.services:
-            vms = current_plan.for_service(service.name)
-            delta = service.replicas - len(vms)
-            if delta != 0:
-                changed = True
-            for _ in range(delta):
-                manager = self._assign_host_for_new_vm()
-                ips_taken = (vm.address for vm in [*vms, *new_vms, *current_plan.vms])
-                ip = manager.address_pool.generate_one_not_in(ips_taken)
-                vms.append(
-                    VMConfig(
-                        service=service.name,
-                        manager=manager.name,
-                        address=ip,
-                        port=service.port,
-                        token=uuid4(),
-                    )
-                )
-            for _ in range(-delta):
-                to_remove = self._choose_vm_to_delete(vms)
-                vms.remove(to_remove)
-            new_vms += vms
+        for service, lb_config in self._config.service_lb_pairs():
+            workers, workers_changed = self._remake_service_workers(
+                service,
+                current_plan,
+                new_vms,
+            )
+            lb, lb_changed = self._remake_service_lb(
+                service,
+                lb_config,
+                current_plan,
+                new_vms,
+                workers,
+            )
+            print(lb)
+            new_vms += workers + lb
+            changed = changed or workers_changed or lb_changed
 
         new_version = current_plan.version + 1
         return Plan(version=new_version, vms=new_vms) if changed else self._plan
 
+    def _remake_service_workers(
+        self, service: ServiceConfig, current_plan: Plan, new_vms: Iterable[Vm]
+    ) -> tuple[list[Vm], bool]:
+        changed = False
+        workers = current_plan.workers_for_service(service.name)
+        delta = service.replicas - len(workers)
+        if delta != 0:
+            changed = True
+        for _ in range(delta):
+            manager = self._assign_host_for_new_vm()
+            ips_taken = (vm.address for vm in [*workers, *new_vms, *current_plan.vms])
+            ip = manager.address_pool.generate_one_not_in(ips_taken)
+            workers.append(
+                Worker(
+                    service=service.name,
+                    manager=manager.name,
+                    address=ip,
+                    port=service.port,
+                    token=uuid4(),
+                )
+            )
+        for _ in range(-delta):
+            to_remove = self._choose_vm_to_delete(workers)
+            workers.remove(to_remove)
+        return workers, changed
+
     def _assign_host_for_new_vm(self) -> ManagerConfig:
         return random.choice(self._config.managers)
 
-    def _choose_vm_to_delete(self, vms: list[VMConfig]) -> VMConfig:
+    def _choose_vm_to_delete(self, vms: list[Vm]) -> Vm:
         return random.choice(vms)
 
+    def _remake_service_lb(
+        self,
+        service: ServiceConfig,
+        lb_config: LBConfig | None,
+        current_plan: Plan,
+        new_vms: Iterable[Vm],
+        workers: Iterable[Vm],
+    ) -> tuple[list[LoadBalancer], bool]:
+        lb_vm = current_plan.lb_for_service(service.name)
+        upstream = [(vm.address, vm.port) for vm in workers]
+
+        if lb_config is None:
+            print("1")
+            return [], lb_vm is not None
+
+        if lb_vm is None:
+            print("2")
+            # create new vm
+            manager = self._assign_host_for_new_vm()
+            ips_taken = (vm.address for vm in [*workers, *new_vms, *current_plan.vms])
+            ip = manager.address_pool.generate_one_not_in(ips_taken)
+            new_lb = LoadBalancer(
+                service=lb_config.service,
+                manager=manager.name,
+                address=ip,
+                port=lb_config.port,
+                token=uuid4(),
+                upstream=upstream,
+            )
+            return [new_lb], True
+
+        # check if old vm modified
+        new_fields = {"upstream": upstream, "port": lb_config.port}
+        old_fields = lb_vm.model_dump(include=set(new_fields.keys()))
+        if new_fields != old_fields:
+            print("3")
+            return [lb_vm.model_copy(update=new_fields)], True
+        else:
+            print("4")
+            return [lb_vm], False
+
     async def _on_plan_changed(self, plan: Plan):
-        self._plan = plan
         new_vms = list(self.my_vms(plan.vms))
-        old_vms = list(self._vmm.list_current_vms())
+        old_vms = list(self.my_vms(self._plan.vms, with_libvirt_query=True))
+        self._plan = plan
         new_vm_names = {vm.name for vm in new_vms}
         old_vm_names = {vm.name for vm in old_vms}
+
         to_create = [vm for vm in new_vms if vm.name not in old_vm_names]
         to_delete = [vm for vm in old_vms if vm.name not in new_vm_names]
+
+        old_lbs = {vm.name: vm for vm in old_vms if isinstance(vm, LoadBalancer)}
+        lbs_to_update = [
+            vm
+            for vm in new_vms
+            if isinstance(vm, LoadBalancer)
+            if vm.name in old_lbs and vm.model_dump() != old_lbs[vm.name].model_dump()
+        ]
+
         await asyncio.gather(
             *(self._create_vm(vm) for vm in to_create),
             *(self._delete_vm(vm) for vm in to_delete),
+            *(self._update_lb(lb) for lb in lbs_to_update),
         )
         self._statuses = {
             vm.token: ConnectionStatus() for vm in new_vms
         } | self._statuses
 
-    async def _create_vm(self, vm: VMConfig):
-        service = self._service_for(vm)
+    async def _create_vm(self, vm: Vm):
+        match vm:
+            case Worker():
+                config = self._service_for(vm)
+            case LoadBalancer() as lb:
+                config = self._lb_config_for(lb)
         logger.info(f"starting VM {vm.name}")
-        await self._vmm.create_new_vm(vm, service)
+        await self._vmm.create_new_vm(vm, config)
         logger.info(f"VM {vm.name} active")
         status = ConnectionStatus()
         self._statuses[vm.token] = status
 
-    def _service_for(self, vm: VMConfig) -> ServiceConfig:
+    def _service_for(self, vm: Vm) -> ServiceConfig:
         for service in self._config.services:
             if service.name == vm.service:
                 return service
         raise KeyError(f"service '{vm.service}' for VM {vm.name} not found")
 
-    async def _delete_vm(self, vm: VMConfig):
+    def _lb_config_for(self, lb: LoadBalancer) -> LBConfig:
+        for config in self._config.load_balancers:
+            if config.service == lb.service:
+                return config
+        raise KeyError(f"load balancer config for service '{lb.service}'")
+
+    async def _delete_vm(self, vm: Vm):
         logger.info(f"deleting VM {vm.name}")
         await self._vmm.delete_vm(vm.name)
         self._statuses.pop(vm.token, None)
+
+    async def _update_lb(self, lb: LoadBalancer):
+        logger.info(f"updating upstream of LB {lb.name}")
+        await self._vmm.setup_nginx(lb)
 
     @property
     def token(self) -> UUID4:
@@ -244,10 +334,18 @@ class Manager:
             mgrs = self._config.managers
         yield from (mgr for mgr in mgrs if mgr.name != self._name)
 
-    def my_vms(self, vms: Iterable[VMConfig] | None = None) -> Iterable[VMConfig]:
+    def my_vms(
+        self, vms: Iterable[Vm] | None = None, with_libvirt_query: bool = False
+    ) -> Iterable[Vm]:
         if vms is None:
             vms = self._plan.vms
-        yield from (vm for vm in vms if vm.manager == self._name)
+        vms = [vm for vm in vms if vm.manager == self._name]
+        yield from vms
+        if with_libvirt_query:
+            used_names = {vm.name for vm in vms}
+            yield from (
+                vm for vm in self._vmm.list_current_vms() if vm.name not in used_names
+            )
 
 
 class ConnectionStatus(BaseModel):
