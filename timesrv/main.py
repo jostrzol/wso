@@ -3,9 +3,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from heart.heart import Heart
+
 from .settings import settings
 
 
@@ -21,4 +23,6 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/time")
 async def get_time():
-    return JSONResponse(datetime.now(), headers={"X-WSO-TOKEN": settings.token})
+    return JSONResponse(
+        jsonable_encoder(datetime.now()), headers={"X-WSO-TOKEN": settings.token}
+    )
