@@ -5,3 +5,4 @@ manager_old.py
 *.qcow2
 /env
 .vscode
+ansible/setup_nginx/nginx.conf
