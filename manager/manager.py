@@ -92,11 +92,8 @@ class Manager:
                 continue
             if status.is_dead:
                 logger.error(f"VM {vm.name} is dead")
-                print(self._plan)
                 removed = self._plan.with_vm_removed(vm.name)
-                print(removed)
                 new_plan = self._remake_plan(removed)
-                print(new_plan)
                 await repository.save_plan(new_plan)
         for manager in self.other_managers():
             status = self.status(manager.token)
@@ -176,7 +173,6 @@ class Manager:
                 new_vms,
                 workers,
             )
-            print(lb)
             new_vms += workers + lb
             changed = changed or workers_changed or lb_changed
 
@@ -227,11 +223,9 @@ class Manager:
         upstream = [(vm.address, vm.port) for vm in workers]
 
         if lb_config is None:
-            print("1")
             return [], lb_vm is not None
 
         if lb_vm is None:
-            print("2")
             # create new vm
             manager = self._assign_host_for_new_vm()
             ips_taken = (vm.address for vm in [*workers, *new_vms, *current_plan.vms])
@@ -250,10 +244,8 @@ class Manager:
         new_fields = {"upstream": upstream, "port": lb_config.port}
         old_fields = lb_vm.model_dump(include=set(new_fields.keys()))
         if new_fields != old_fields:
-            print("3")
             return [lb_vm.model_copy(update=new_fields)], True
         else:
-            print("4")
             return [lb_vm], False
 
     async def _on_plan_changed(self, plan: Plan):
