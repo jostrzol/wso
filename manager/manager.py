@@ -2,9 +2,11 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 import logging
+from math import ceil
 import random
 from typing import Any, Iterable, cast
 from uuid import uuid4
+import uuid
 
 from pydantic import BaseModel, Field, UUID4
 
@@ -12,7 +14,7 @@ from heart.heart import Heart
 from manager.vmm import VMManager
 
 from .config import Config, LBConfig, ManagerConfig, ServiceConfig
-from .plan import LoadBalancer, Plan, Vm, Worker
+from .plan import LoadBalancer, ManagerState, Plan, Vm, Worker
 from .repository import repository
 from .settings import settings
 
@@ -60,15 +62,22 @@ class Manager:
             yield (vm, status)
 
     def status(self, token: UUID4) -> ConnectionStatus | None:
-        status = self._statuses.get(token)
-        if status is None:
-            return None
-        if not status.is_dead and status.last_beat_at:
-            dead_since = status.last_beat_at + self._config.general.max_inactive
-            if dead_since < datetime.now():
-                status = status.model_copy(update={"dead_since": dead_since})
-                self._statuses[token] = status
-        return status
+        return self._statuses.get(token)
+
+    def _update_statuses(self) -> dict[UUID4, ConnectionStatus]:
+        changed_statuses: dict[UUID4, ConnectionStatus] = {}
+        for token, status in self._statuses.items():
+            if status.last_beat_at:
+                dead_since = status.last_beat_at + self._config.general.max_inactive
+                if dead_since < datetime.now() and not status.is_dead:
+                    status = status.model_copy(update={"dead_since": dead_since})
+                    self._statuses[token] = status
+                    changed_statuses[token] = status
+                elif dead_since >= datetime.now() and status.is_dead:
+                    status = status.model_copy(update={"dead_since": None})
+                    self._statuses[token] = status
+                    changed_statuses[token] = status
+        return changed_statuses
 
     async def background_loop(self):
         await asyncio.gather(
@@ -86,21 +95,30 @@ class Manager:
             await asyncio.sleep(1)
 
     async def _correct_plans_once(self):
+        changed_statuses = self._update_statuses()
         for vm in self.my_vms():
-            status = self.status(vm.token)
+            status = changed_statuses.get(vm.token)
             if status is None:
                 continue
             if status.is_dead:
-                logger.error(f"VM {vm.name} is dead")
+                logger.error(f"VM {vm.name} became dead")
                 removed = self._plan.with_vm_removed(vm.name)
                 new_plan = self._remake_plan(removed)
                 await repository.save_plan(new_plan)
+            else:
+                logger.error(f"VM {vm.name} became alive")
         for manager in self.other_managers():
-            status = self.status(manager.token)
+            status = changed_statuses.get(manager.token)
             if status is None:
                 continue
             if status.is_dead:
-                logger.error(f"Manager {manager.name} #{manager.token} is dead")
+                logger.error(f"Manager {manager.name} #{manager.token} became dead")
+                new_plan = self._remake_plan(self._plan)
+                await repository.save_plan(new_plan)
+            else:
+                logger.info(f"Manager {manager.name} #{manager.token} became alive")
+                new_plan = self._remake_plan(self._plan)
+                await repository.save_plan(new_plan)
 
     async def _watch_plan_changes(self):
         async for plan in repository.watch_plan():
@@ -160,35 +178,135 @@ class Manager:
     def _remake_plan(self, current_plan: Plan) -> Plan:
         new_vms: list[Vm] = []
         changed = False
+
+        new_mgr_states, changed_mgr_states = self._remake_manager_states(current_plan)
+        changed = changed or changed_mgr_states
+        active_managers = [
+            mgr
+            for mgr, state in zip(self._config.managers, new_mgr_states)
+            if state.is_active
+        ]
+
         for service, lb_config in self._config.service_lb_pairs():
             workers, workers_changed = self._remake_service_workers(
                 service,
                 current_plan,
                 new_vms,
+                active_managers,
             )
             lb, lb_changed = self._remake_service_lb(
                 service,
                 lb_config,
                 current_plan,
-                new_vms,
                 workers,
+                active_managers,
             )
             new_vms += workers + lb
             changed = changed or workers_changed or lb_changed
 
         new_version = current_plan.version + 1
-        return Plan(version=new_version, vms=new_vms) if changed else self._plan
+        return (
+            Plan(version=new_version, vms=new_vms, manager_states=new_mgr_states)
+            if changed
+            else self._plan
+        )
+
+    def _remake_manager_states(
+        self, current_plan: Plan
+    ) -> tuple[list[ManagerState], bool]:
+        changed = False
+
+        primary: ManagerState | None = None
+        new_manager_names: list[str] = [
+            manager.name
+            for manager in self._config.managers
+            if current_plan.state_for(manager.name) is None
+        ]
+        if len(new_manager_names) != 0:
+            changed = True
+
+        new_manager_states: list[ManagerState] = [
+            state.model_copy(deep=True) for state in current_plan.manager_states
+        ] + [ManagerState(name=name) for name in new_manager_names]
+
+        for manager, state in zip(self._config.managers, new_manager_states):
+            status = self.status(manager.token)
+            is_dead_for_me = status is not None and status.is_dead
+            if is_dead_for_me and self._name not in state.is_dead_for:
+                changed = True
+                state.is_dead_for.add(self._name)
+            elif not is_dead_for_me and self._name in state.is_dead_for:
+                changed = True
+                state.is_dead_for.remove(self._name)
+
+        match [state for state in new_manager_states if state.is_primary]:
+            case [state]:
+                primary = state
+            case _:
+                primary = None
+
+        to_shuffle = list(new_manager_states)
+        random.shuffle(to_shuffle)
+        least_dead = min(
+            to_shuffle,
+            key=lambda state: (len(state.is_dead_for), state.name != self._name),
+        )
+
+        quorum = int(ceil(len(self._config.managers) / 2))
+        if primary is None:
+            changed = True
+            primary = least_dead
+            primary.is_primary = True
+        elif primary.is_dead(quorum) and not least_dead.is_dead(quorum):
+            changed = True
+            primary.is_primary = False
+            primary = least_dead
+            primary.is_primary = True
+
+        new_states_dict = {state.name: state for state in new_manager_states}
+        visited: set[str] = set()
+        to_visit: set[str] = {primary.name}
+        while len(to_visit) != 0:
+            state = new_states_dict[to_visit.pop()]
+            visited.add(state.name)
+            if not state.is_active:
+                changed = True
+                state.is_active = True
+            for other_state in new_manager_states:
+                if state.name in other_state.is_dead_for:
+                    continue
+                if other_state.name in visited:
+                    continue
+                to_visit.add(other_state.name)
+
+        for state in new_manager_states:
+            if state.name in visited:
+                continue
+            if state.is_active:
+                changed = True
+                state.is_active = False
+
+        return new_manager_states, changed
 
     def _remake_service_workers(
-        self, service: ServiceConfig, current_plan: Plan, new_vms: Iterable[Vm]
+        self,
+        service: ServiceConfig,
+        current_plan: Plan,
+        new_vms: Iterable[Vm],
+        active_managers: list[ManagerConfig],
     ) -> tuple[list[Vm], bool]:
         changed = False
-        workers = current_plan.workers_for_service(service.name)
+        active_manager_names = {manager.name for manager in active_managers}
+        workers = [
+            worker
+            for worker in current_plan.workers_for_service(service.name)
+            if worker.manager in active_manager_names
+        ]
         delta = service.replicas - len(workers)
         if delta != 0:
             changed = True
         for _ in range(delta):
-            manager = self._assign_host_for_new_vm()
+            manager = self._assign_host_for_new_vm(active_managers)
             ips_taken = (vm.address for vm in [*workers, *new_vms, *current_plan.vms])
             ip = manager.address_pool.generate_one_not_in(ips_taken)
             workers.append(
@@ -205,8 +323,10 @@ class Manager:
             workers.remove(to_remove)
         return workers, changed
 
-    def _assign_host_for_new_vm(self) -> ManagerConfig:
-        return random.choice(self._config.managers)
+    def _assign_host_for_new_vm(
+        self, active_managers: list[ManagerConfig]
+    ) -> ManagerConfig:
+        return random.choice(active_managers)
 
     def _choose_vm_to_delete(self, vms: list[Vm]) -> Vm:
         return random.choice(vms)
@@ -216,8 +336,8 @@ class Manager:
         service: ServiceConfig,
         lb_config: LBConfig | None,
         current_plan: Plan,
-        new_vms: Iterable[Vm],
         workers: Iterable[Vm],
+        active_managers: list[ManagerConfig],
     ) -> tuple[list[LoadBalancer], bool]:
         lb_vm = current_plan.lb_for_service(service.name)
         upstream = [(vm.address, vm.port) for vm in workers]
@@ -227,7 +347,7 @@ class Manager:
 
         if lb_vm is None:
             # create new vm
-            manager = self._assign_host_for_new_vm()
+            manager = self._assign_host_for_new_vm(active_managers)
             new_lb = LoadBalancer(
                 service=lb_config.service,
                 manager=manager.name,
@@ -239,14 +359,27 @@ class Manager:
             return [new_lb], True
 
         # check if old vm modified
+        active_manager_names = {manager.name for manager in active_managers}
+        manager = (
+            lb_vm.manager
+            if lb_vm.manager in active_manager_names
+            else self._assign_host_for_new_vm(active_managers).name
+        )
+
         new_fields = {
             "upstream": upstream,
             "port": lb_config.port,
             "address": lb_config.address,
+            "manager": manager,
         }
         old_fields = lb_vm.model_dump(include=set(new_fields.keys()))
-        if new_fields != old_fields:
-            return [lb_vm.model_copy(update=new_fields)], True
+        diffs = {key: new_fields[key] != old_fields[key] for key in new_fields.keys()}
+        if any(diffs.values()):
+            requires_rebuild = ["address", "manager"]
+            if any(diffs[key] for key in requires_rebuild):
+                new_fields["token"] = uuid4()
+            new_lb_vm = lb_vm.model_copy(update=new_fields)
+            return [new_lb_vm], True
         else:
             return [lb_vm], False
 
