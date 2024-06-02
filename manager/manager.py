@@ -228,12 +228,10 @@ class Manager:
         if lb_vm is None:
             # create new vm
             manager = self._assign_host_for_new_vm()
-            ips_taken = (vm.address for vm in [*workers, *new_vms, *current_plan.vms])
-            ip = manager.address_pool.generate_one_not_in(ips_taken)
             new_lb = LoadBalancer(
                 service=lb_config.service,
                 manager=manager.name,
-                address=ip,
+                address=lb_config.address,
                 port=lb_config.port,
                 token=uuid4(),
                 upstream=upstream,
@@ -241,7 +239,11 @@ class Manager:
             return [new_lb], True
 
         # check if old vm modified
-        new_fields = {"upstream": upstream, "port": lb_config.port}
+        new_fields = {
+            "upstream": upstream,
+            "port": lb_config.port,
+            "address": lb_config.address,
+        }
         old_fields = lb_vm.model_dump(include=set(new_fields.keys()))
         if new_fields != old_fields:
             return [lb_vm.model_copy(update=new_fields)], True

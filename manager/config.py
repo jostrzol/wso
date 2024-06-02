@@ -46,6 +46,7 @@ class ServiceConfig(BaseModel):
 
 class LBConfig(BaseModel):
     service: str
+    address: IPv4Address
     port: int
 
     @property
