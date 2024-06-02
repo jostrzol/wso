@@ -149,7 +149,10 @@ class VMManager:
         await self._ansible(
             playbook="setup_nginx/playbook.yaml",
             host=lb.address,
-            variables={"ip": lb.address},
+            variables={"ip": lb.address,
+                "wsotimesrv_token": lb.token,
+                "wsotimesrv_manager_address": self.config.host
+            },
         )
 
     async def _setup_timesrv(self, vm: Vm):

@@ -18,3 +18,14 @@
       service:
         name: nginx
         state: reloaded
+
+    - name: run heart
+      ansible.builtin.shell: |
+        nohup python3 -m heart.main > /root/logfile.log 2>&1 &
+      args:
+        chdir: /root/wso
+      environment:
+        WSOHEART_MANAGER_ADDRESS: "{{ wsotimesrv_manager_address }}"
+        WSOHEART_TOKEN: "{{ wsotimesrv_token }}"
+      async: 1
+      poll: 0
