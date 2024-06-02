@@ -78,8 +78,8 @@ class IPv4Range(RootModel[str]):
         return start, end
 
     def range(self) -> Iterable[IPv4Address]:
-        start = int.from_bytes(self.start.packed)
-        end = int.from_bytes(self.end.packed)
+        start = int.from_bytes(self.start.packed, byteorder="big")
+        end = int.from_bytes(self.end.packed, byteorder="big")
         for i in range(start, end + 1):
             yield IPv4Address(i)
 
