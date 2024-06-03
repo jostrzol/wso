@@ -56,17 +56,21 @@ def generate_nginx_conf(
     }}
 
     http {{
-        upstream backend {{
-      {server_block}
-        }}
+      limit_req_zone $binary_remote_addr zone=mylimit:1m rate=1r/s;
 
-        server {{
-            listen {port};
+      upstream backend {{
+        {server_block}
+      }}
 
-            location / {{
-                proxy_pass http://backend;
-            }}
+      server {{
+        listen {port};
+
+        location / {{
+          limit_req zone=mylimit;
+
+          proxy_pass http://backend;
         }}
+      }}
     }}
     """
 
